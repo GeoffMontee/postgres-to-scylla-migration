@@ -11,8 +11,8 @@ import time
 import docker
 import psycopg2
 from psycopg2 import sql
-from scylla.cluster import Cluster
-from scylla.auth import PlainTextAuthProvider
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
 
 
 def main():
@@ -120,9 +120,9 @@ def install_scylla_fdw(args):
         # Install build dependencies
         commands = [
             "apt-get update",
-            "apt-get install -y build-essential postgresql-server-dev-16 git libssl-dev",
-            "cd /tmp && git clone https://github.com/GeoffMontee/scylla_fdw.git",
-            "cd /tmp/scylla_fdw && make && make install",
+            "apt-get install -y build-essential postgresql-server-dev-18 git libssl-dev",
+            "cd /tmp && ([ -d scylla_fdw ] && (cd scylla_fdw && git pull) || git clone https://github.com/GeoffMontee/scylla_fdw.git)",
+            "cd /tmp/scylla_fdw && make USE_PGXS=1 && make USE_PGXS=1 install",
         ]
         
         for cmd in commands:
