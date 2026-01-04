@@ -11,6 +11,26 @@ import docker
 from docker.errors import NotFound, APIError, ImageNotFound
 
 
+def ensure_network(client, network_name):
+    """
+    Ensure a Docker network exists for container communication.
+    
+    Args:
+        client: Docker client instance
+        network_name: Name of the network to create
+    """
+    try:
+        network = client.networks.get(network_name)
+        print(f"✓ Network '{network_name}' already exists")
+    except docker.errors.NotFound:
+        print(f"⟳ Creating network '{network_name}'...")
+        client.networks.create(network_name, driver="bridge")
+        print(f"✓ Network '{network_name}' created")
+    except Exception as e:
+        print(f"✗ Error with network: {e}")
+        sys.exit(1)
+
+
 def main():
     """Main function to start and manage database containers."""
     try:
@@ -46,6 +66,10 @@ def main():
             print("  export DOCKER_HOST=unix:///Users/geoffmontee/.colima/default/docker.sock")
             sys.exit(1)
 
+    # Create shared network for container communication
+    network_name = "migration-network"
+    ensure_network(client, network_name)
+    
     # Configuration
     postgres_config = {
         "name": "postgresql-migration-source",
@@ -57,7 +81,8 @@ def main():
             "POSTGRES_DB": "postgres"
         },
         "detach": True,
-        "remove": False
+        "remove": False,
+        "network": network_name
     }
 
     scylla_config = {
@@ -71,7 +96,8 @@ def main():
         },
         "detach": True,
         "remove": False,
-        "command": "--smp 1 --memory 400M --overprovisioned 1 --api-address 0.0.0.0"
+        "command": "--smp 1 --memory 400M --overprovisioned 1 --api-address 0.0.0.0",
+        "network": network_name
     }
 
     # Manage PostgreSQL container
@@ -292,23 +318,36 @@ def print_connection_info():
     """Print connection information for both databases."""
     print("\n📝 Connection Information:")
     print("\nPostgreSQL:")
-    print("  Host: localhost")
-    print("  Port: 5432")
-    print("  Username: postgres")
-    print("  Password: postgres")
-    print("  Database: postgres")
-    print("  Connection string: postgresql://postgres:postgres@localhost:5432/postgres")
+    print("  From host:")
+    print("    Host: localhost")
+    print("    Port: 5432")
+    print("    Username: postgres")
+    print("    Password: postgres")
+    print("    Database: postgres")
+    print("    Connection string: postgresql://postgres:postgres@localhost:5432/postgres")
+    print("\n  From containers (via Docker network):")
+    print("    Host: postgresql-migration-source")
+    print("    Port: 5432")
     
     print("\nScyllaDB:")
-    print("  Host: localhost")
-    print("  CQL Native Port: 9042")
-    print("  CQL SSL Port: 9142")
-    print("  Alternator Port: 19042")
-    print("  Alternator SSL Port: 19142")
+    print("  From host:")
+    print("    Host: localhost")
+    print("    CQL Native Port: 9042")
+    print("    CQL SSL Port: 9142")
+    print("    Alternator Port: 19042")
+    print("    Alternator SSL Port: 19142")
+    print("\n  From containers (via Docker network):")
+    print("    Host: scylladb-migration-target")
+    print("    CQL Native Port: 9042")
+    print("\nDocker Network:")
+    print("  Name: migration-network")
+    print("  Both containers are connected and can communicate")
     print("\nTo stop the containers:")
     print("  docker stop postgresql-migration-source scylladb-migration-target")
     print("\nTo remove the containers:")
     print("  docker rm postgresql-migration-source scylladb-migration-target")
+    print("\nTo remove the network:")
+    print("  docker network rm migration-network")
 
 
 if __name__ == "__main__":

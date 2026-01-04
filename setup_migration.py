@@ -94,7 +94,7 @@ def parse_arguments():
     # ScyllaDB options
     scylla_group = parser.add_argument_group('ScyllaDB options')
     scylla_group.add_argument('--scylla-host', default='localhost',
-                              help='ScyllaDB host')
+                              help='ScyllaDB host (use "scylladb-migration-target" for FDW connection)')
     scylla_group.add_argument('--scylla-port', type=int, default=9042,
                               help='ScyllaDB CQL port')
     scylla_group.add_argument('--scylla-user', default=None,
@@ -105,6 +105,8 @@ def parse_arguments():
                               help='ScyllaDB keyspace')
     scylla_group.add_argument('--scylla-docker-container', default='scylladb-migration-target',
                               help='ScyllaDB docker container name')
+    scylla_group.add_argument('--scylla-fdw-host', default='scylladb-migration-target',
+                              help='ScyllaDB host for FDW (container name for Docker network)')
     
     return parser.parse_args()
 
@@ -207,7 +209,7 @@ def setup_fdw_infrastructure(conn, args):
             CREATE SERVER scylla_server
             FOREIGN DATA WRAPPER scylla_fdw
             OPTIONS (host %s, port %s);
-        """), [args.scylla_host, str(args.scylla_port)])
+        """), [args.scylla_fdw_host, str(args.scylla_port)])
         
         # Create user mapping
         print(f"  Creating user mapping...")
