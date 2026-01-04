@@ -119,6 +119,28 @@ ScyllaDB options:
 - `--scylla-fdw-host` - ScyllaDB host for FDW (default: scylladb-migration-target)
 - `--scylla-docker-container` - Container name (default: scylladb-migration-target)
 
+### 3. destroy_db_containers.py
+
+Cleans up all Docker containers and resources created by the migration toolkit.
+
+**What it does:**
+- Stops and removes PostgreSQL container
+- Stops and removes ScyllaDB container
+- Removes the shared Docker network
+- Cleans up associated volumes
+
+**Usage:**
+```bash
+python3 destroy_db_containers.py
+```
+
+The script will prompt for confirmation before destroying any resources. This is useful for:
+- Cleaning up after testing
+- Starting fresh with new containers
+- Freeing up system resources
+
+**Warning:** This operation is destructive and will delete all data in the containers.
+
 ## Quick Start Guide
 
 ### Step 1: Start Database Containers
@@ -233,6 +255,12 @@ Generates 1000 rows per table using PostgreSQL's `generate_series()` function.
 
 ## Maintenance Commands
 
+### Clean Up Everything (Recommended)
+```bash
+python3 destroy_db_containers.py
+```
+This removes all containers, networks, and volumes with confirmation prompts.
+
 ### Stop Containers
 ```bash
 docker stop postgresql-migration-source scylladb-migration-target
@@ -243,12 +271,12 @@ docker stop postgresql-migration-source scylladb-migration-target
 docker start postgresql-migration-source scylladb-migration-target
 ```
 
-### Remove Containers
+### Remove Containers (Manual)
 ```bash
 docker rm -f postgresql-migration-source scylladb-migration-target
 ```
 
-### Remove Network
+### Remove Network (Manual)
 ```bash
 docker network rm migration-network
 ```
