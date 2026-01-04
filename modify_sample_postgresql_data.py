@@ -65,7 +65,7 @@ def main():
     print("\nTo verify replication:")
     print(f"  PostgreSQL: SELECT * FROM {args.postgres_source_schema}.animals WHERE animal_id >= 10000;")
     print(f"  Foreign table: SELECT * FROM {args.postgres_fdw_schema}.animals WHERE animal_id >= 10000;")
-    print("  ScyllaDB: docker exec -it scylladb-migration-target cqlsh -e \"SELECT * FROM migration.animals WHERE animal_id >= 10000;\"")
+    print(f"  ScyllaDB: docker exec -it scylladb-migration-target cqlsh -e \"SELECT * FROM {args.scylla_ks}.animals WHERE animal_id >= 10000;\"")
 
 
 def parse_arguments():
@@ -91,6 +91,11 @@ def parse_arguments():
                           help='PostgreSQL source schema containing tables')
     pg_group.add_argument('--postgres-fdw-schema', default='scylla_fdw',
                           help='PostgreSQL FDW schema (for verification hints)')
+    
+    # ScyllaDB options
+    scylla_group = parser.add_argument_group('ScyllaDB options')
+    scylla_group.add_argument('--scylla-ks', default='migration',
+                              help='ScyllaDB keyspace name')
     
     return parser.parse_args()
 

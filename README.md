@@ -156,10 +156,11 @@ Modifies sample PostgreSQL data to test replication to ScyllaDB.
 # Basic usage (with defaults)
 python3 modify_sample_postgresql_data.py
 
-# Custom schema
+# Custom schema and keyspace (matching setup_migration.py)
 python3 modify_sample_postgresql_data.py \
   --postgres-source-schema public \
-  --postgres-fdw-schema public_fdw
+  --postgres-fdw-schema public_fdw \
+  --scylla-ks target_ks
 ```
 
 **Command-line Options:**
@@ -170,6 +171,7 @@ python3 modify_sample_postgresql_data.py \
 - `--postgres-db` - PostgreSQL database (default: postgres)
 - `--postgres-source-schema` - Source schema (default: public)
 - `--postgres-fdw-schema` - FDW schema for verification hints (default: scylla_fdw)
+- `--scylla-ks` - ScyllaDB keyspace name (default: migration)
 
 ## Quick Start Guide
 
