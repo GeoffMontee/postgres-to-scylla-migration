@@ -283,7 +283,7 @@ def setup_table_migration(pg_conn, scylla_session, table_name, args):
     
     # Create triggers on source table
     create_replication_triggers(pg_conn, args.postgres_source_schema, 
-                                args.postgres_fdw_schema, table_name, columns)
+                                args.postgres_fdw_schema, table_name, columns, primary_key)
     
     print(f"  ✓ Migration setup complete for table '{table_name}'")
 
@@ -461,7 +461,7 @@ def create_foreign_table(conn, fdw_schema, scylla_keyspace, table_name, columns,
         cursor.close()
 
 
-def create_replication_triggers(conn, source_schema, fdw_schema, table_name, columns):
+def create_replication_triggers(conn, source_schema, fdw_schema, table_name, columns, primary_key):
     """Create triggers to replicate changes from source to foreign table."""
     cursor = conn.cursor()
     try:
@@ -483,12 +483,25 @@ def create_replication_triggers(conn, source_schema, fdw_schema, table_name, col
         
         # Get column names
         col_names = [col['name'] for col in columns]
+        
+        # Separate primary key columns from non-primary key columns
+        pk_set = set(primary_key)
+        non_pk_cols = [col for col in col_names if col not in pk_set]
+        
+        # Build strings for INSERT (all columns)
         col_identifiers = ', '.join([f'"{col}"' for col in col_names])
         new_values = ', '.join([f'NEW."{col}"' for col in col_names])
         
-        # Build WHERE clause for primary key (first column for now)
-        pk_where = ' AND '.join([f'"{col}" = OLD."{col}"' for col in col_names[:1]])
-        set_clause = ', '.join([f'"{col}" = NEW."{col}"' for col in col_names])
+        # Build WHERE clause using primary key columns
+        pk_where = ' AND '.join([f'"{col}" = OLD."{col}"' for col in primary_key])
+        
+        # Build SET clause for UPDATE (only non-primary key columns)
+        if non_pk_cols:
+            set_clause = ', '.join([f'"{col}" = NEW."{col}"' for col in non_pk_cols])
+        else:
+            # If all columns are primary keys, there's nothing to update
+            # This shouldn't happen in practice, but we handle it
+            set_clause = f'"{col_names[0]}" = NEW."{col_names[0]}"'
         
         # Create trigger function
         trigger_func = sql.SQL("""
