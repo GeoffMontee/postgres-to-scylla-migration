@@ -59,6 +59,7 @@ PostgreSQL source table
 - `start_db_containers.py` - Container lifecycle management with health checks
 - `setup_migration.py` - Migration infrastructure setup and scylla_fdw installation
 - `destroy_db_containers.py` - Clean up all Docker containers and resources
+- `modify_sample_postgresql_data.py` - Test replication by modifying sample data
 - `sample_postgresql_schema.sql` - Example schema (animal-themed, 3 tables)
 - `sample_postgresql_data.sql` - Sample data generation (1000 rows per table)
 
@@ -185,10 +186,10 @@ if result.exit_code != 0:
 
 ### Manual Testing Workflow
 1. Start containers: `python3 start_db_containers.py`
-2. Load sample data: `psql < sample_postgresql_schema.sql`
+2. Load sample data: `psql < sample_postgresql_schema.sql && psql < sample_postgresql_data.sql`
 3. Setup migration: `python3 setup_migration.py`
-4. Test replication: INSERT → verify in foreign table → verify in ScyllaDB
-5. Test all operations: INSERT, UPDATE, DELETE
+4. Test replication: `python3 modify_sample_postgresql_data.py`
+5. Verify changes in foreign table and ScyllaDB
 6. Clean up: `python3 destroy_db_containers.py`
 
 ### Health Validation

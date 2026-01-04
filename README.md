@@ -141,6 +141,36 @@ The script will prompt for confirmation before destroying any resources. This is
 
 **Warning:** This operation is destructive and will delete all data in the containers.
 
+### 4. modify_sample_postgresql_data.py
+
+Modifies sample PostgreSQL data to test replication to ScyllaDB.
+
+**What it does:**
+- Performs INSERT operations (3 animals, 2 habitats, 2 feedings with IDs 10001+)
+- Performs UPDATE operations on newly inserted records
+- Performs DELETE operations on selected records
+- Provides verification commands to check replication
+
+**Usage:**
+```bash
+# Basic usage (with defaults)
+python3 modify_sample_postgresql_data.py
+
+# Custom schema
+python3 modify_sample_postgresql_data.py \
+  --postgres-source-schema public \
+  --postgres-fdw-schema public_fdw
+```
+
+**Command-line Options:**
+- `--postgres-host` - PostgreSQL host (default: localhost)
+- `--postgres-port` - PostgreSQL port (default: 5432)
+- `--postgres-user` - PostgreSQL user (default: postgres)
+- `--postgres-password` - PostgreSQL password (default: postgres)
+- `--postgres-db` - PostgreSQL database (default: postgres)
+- `--postgres-source-schema` - Source schema (default: public)
+- `--postgres-fdw-schema` - FDW schema for verification hints (default: scylla_fdw)
+
 ## Quick Start Guide
 
 ### Step 1: Start Database Containers
@@ -168,6 +198,15 @@ python3 setup_migration.py \
 ```
 
 ### Step 4: Test Replication
+
+**Option A: Use the test script (recommended)**
+```bash
+python3 modify_sample_postgresql_data.py
+```
+
+This will perform INSERT, UPDATE, and DELETE operations and show you verification commands.
+
+**Option B: Manual testing**
 ```bash
 # Connect to PostgreSQL
 psql -h localhost -U postgres -d postgres
