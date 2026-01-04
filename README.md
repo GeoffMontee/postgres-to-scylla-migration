@@ -156,7 +156,7 @@ Modifies sample PostgreSQL data to test replication to ScyllaDB.
 # Basic usage (with defaults)
 python3 modify_sample_postgresql_data.py
 
-# Custom schema and keyspace (matching setup_migration.py)
+# Custom schema and keyspace (matching setup_migration.py example)
 python3 modify_sample_postgresql_data.py \
   --postgres-source-schema public \
   --postgres-fdw-schema public_fdw \
@@ -203,7 +203,10 @@ python3 setup_migration.py \
 
 **Option A: Use the test script (recommended)**
 ```bash
-python3 modify_sample_postgresql_data.py
+python3 modify_sample_postgresql_data.py \
+  --postgres-source-schema public \
+  --postgres-fdw-schema public_fdw \
+  --scylla-ks target_ks
 ```
 
 This will perform INSERT, UPDATE, and DELETE operations and show you verification commands.
