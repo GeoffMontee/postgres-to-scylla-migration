@@ -279,7 +279,7 @@ def setup_table_migration(pg_conn, scylla_session, table_name, args):
     
     # Create foreign table in PostgreSQL
     create_foreign_table(pg_conn, args.postgres_fdw_schema, args.scylla_ks, 
-                        table_name, columns)
+                        table_name, columns, primary_key)
     
     # Create triggers on source table
     create_replication_triggers(pg_conn, args.postgres_source_schema, 
@@ -418,7 +418,7 @@ def create_scylla_table(session, keyspace, table_name, columns, primary_key):
         raise
 
 
-def create_foreign_table(conn, fdw_schema, scylla_keyspace, table_name, columns):
+def create_foreign_table(conn, fdw_schema, scylla_keyspace, table_name, columns, primary_key):
     """Create foreign table in PostgreSQL."""
     cursor = conn.cursor()
     try:
@@ -436,19 +436,22 @@ def create_foreign_table(conn, fdw_schema, scylla_keyspace, table_name, columns)
                 col_type = f"{col_type}({col['max_length']})"
             col_defs.append(f"{col['name']} {col_type}")
         
+        # Build primary key string for OPTIONS
+        pk_string = ', '.join(primary_key)
+        
         # Create foreign table
         create_stmt = sql.SQL("""
             CREATE FOREIGN TABLE {}.{} (
                 {}
             ) SERVER scylla_server
-            OPTIONS (keyspace %s, table %s)
+            OPTIONS (keyspace %s, table %s, primary_key %s)
         """).format(
             sql.Identifier(fdw_schema),
             sql.Identifier(table_name),
             sql.SQL(', '.join(col_defs))
         )
         
-        cursor.execute(create_stmt, [scylla_keyspace, table_name])
+        cursor.execute(create_stmt, [scylla_keyspace, table_name, pk_string])
         print(f"    ✓ Foreign table '{fdw_schema}.{table_name}' created")
         
     except Exception as e:
