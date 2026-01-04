@@ -122,7 +122,15 @@ def install_scylla_fdw(args):
         # Install build dependencies
         commands = [
             "apt-get update",
-            "apt-get install -y build-essential postgresql-server-dev-18 git libssl-dev",
+            "apt-get install -y build-essential postgresql-server-dev-18 git libssl-dev cmake libuv1-dev zlib1g-dev pkg-config curl",
+            # Install Rust compiler (required for cpp-rs-driver)
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+            # Build and install cpp-rs-driver (required by scylla_fdw)
+            "cd /tmp && ([ -d cpp-rust-driver ] && (cd cpp-rust-driver && git pull) || git clone https://github.com/scylladb/cpp-rust-driver.git)",
+            "bash -c 'source $HOME/.cargo/env && cd /tmp/cpp-rust-driver && mkdir -p build && cd build && cmake .. && make && make install'",
+            # Update library cache
+            "ldconfig",
+            # Build and install scylla_fdw
             "cd /tmp && ([ -d scylla_fdw ] && (cd scylla_fdw && git pull) || git clone https://github.com/GeoffMontee/scylla_fdw.git)",
             "cd /tmp/scylla_fdw && make USE_PGXS=1 && make USE_PGXS=1 install",
         ]
