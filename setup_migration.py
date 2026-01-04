@@ -126,8 +126,8 @@ def install_scylla_fdw(args):
             # Install Rust compiler (required for cpp-rs-driver)
             "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
             # Build and install cpp-rs-driver (required by scylla_fdw)
-            "cd /tmp && ([ -d cpp-rust-driver ] && (cd cpp-rust-driver && git pull) || git clone https://github.com/scylladb/cpp-rust-driver.git)",
-            "bash -c 'source $HOME/.cargo/env && cd /tmp/cpp-rust-driver && mkdir -p build && cd build && cmake .. && make && make install'",
+            "cd /tmp && ([ -d cpp-rs-driver ] && (cd cpp-rs-driver && git pull) || git clone https://github.com/scylladb/cpp-rs-driver.git cpp-rs-driver)",
+            "bash -c 'source $HOME/.cargo/env && cd /tmp/cpp-rs-driver && mkdir -p build && cd build && cmake .. && make && make install'",
             # Update library cache
             "ldconfig",
             # Build and install scylla_fdw
@@ -441,7 +441,7 @@ def create_foreign_table(conn, fdw_schema, scylla_keyspace, table_name, columns)
             CREATE FOREIGN TABLE {}.{} (
                 {}
             ) SERVER scylla_server
-            OPTIONS (keyspace %s, table_name %s)
+            OPTIONS (keyspace %s, table %s)
         """).format(
             sql.Identifier(fdw_schema),
             sql.Identifier(table_name),
@@ -464,63 +464,81 @@ def create_replication_triggers(conn, source_schema, fdw_schema, table_name, col
     try:
         # Drop existing trigger function and trigger
         cursor.execute(sql.SQL("""
-            DROP TRIGGER IF EXISTS {}_scylla_replication_trigger ON {}.{}
+            DROP TRIGGER IF EXISTS {} ON {}.{}
         """).format(
-            sql.Identifier(f"{table_name}_scylla"),
+            sql.Identifier(f"{table_name}_scylla_replication_trigger"),
             sql.Identifier(source_schema),
             sql.Identifier(table_name)
         ))
         
         cursor.execute(sql.SQL("""
-            DROP FUNCTION IF EXISTS {}.{}_scylla_replication() CASCADE
+            DROP FUNCTION IF EXISTS {}.{} CASCADE
         """).format(
             sql.Identifier(source_schema),
-            sql.Identifier(table_name)
+            sql.Identifier(f"{table_name}_scylla_replication")
         ))
         
         # Get column names
         col_names = [col['name'] for col in columns]
-        col_identifiers = ', '.join(col_names)
-        new_values = ', '.join([f'NEW.{col}' for col in col_names])
+        col_identifiers = ', '.join([f'"{col}"' for col in col_names])
+        new_values = ', '.join([f'NEW."{col}"' for col in col_names])
+        
+        # Build WHERE clause for primary key (first column for now)
+        pk_where = ' AND '.join([f'"{col}" = OLD."{col}"' for col in col_names[:1]])
+        set_clause = ', '.join([f'"{col}" = NEW."{col}"' for col in col_names])
         
         # Create trigger function
-        trigger_func = f"""
-            CREATE OR REPLACE FUNCTION {source_schema}.{table_name}_scylla_replication()
+        trigger_func = sql.SQL("""
+            CREATE OR REPLACE FUNCTION {}.{}()
             RETURNS TRIGGER AS $$
             BEGIN
                 IF (TG_OP = 'DELETE') THEN
-                    DELETE FROM {fdw_schema}.{table_name}
-                    WHERE {' AND '.join([f'{col} = OLD.{col}' for col in col_names[:1]])};
+                    DELETE FROM {}.{}
+                    WHERE {};
                     RETURN OLD;
                 ELSIF (TG_OP = 'UPDATE') THEN
-                    UPDATE {fdw_schema}.{table_name}
-                    SET {', '.join([f'{col} = NEW.{col}' for col in col_names])}
-                    WHERE {' AND '.join([f'{col} = OLD.{col}' for col in col_names[:1]])};
+                    UPDATE {}.{}
+                    SET {}
+                    WHERE {};
                     RETURN NEW;
                 ELSIF (TG_OP = 'INSERT') THEN
-                    INSERT INTO {fdw_schema}.{table_name} ({col_identifiers})
-                    VALUES ({new_values});
+                    INSERT INTO {}.{} ({})
+                    VALUES ({});
                     RETURN NEW;
                 END IF;
                 RETURN NULL;
             END;
             $$ LANGUAGE plpgsql;
-        """
+        """).format(
+            sql.Identifier(source_schema),
+            sql.Identifier(f"{table_name}_scylla_replication"),
+            sql.Identifier(fdw_schema),
+            sql.Identifier(table_name),
+            sql.SQL(pk_where),
+            sql.Identifier(fdw_schema),
+            sql.Identifier(table_name),
+            sql.SQL(set_clause),
+            sql.SQL(pk_where),
+            sql.Identifier(fdw_schema),
+            sql.Identifier(table_name),
+            sql.SQL(col_identifiers),
+            sql.SQL(new_values)
+        )
         
         cursor.execute(trigger_func)
         
         # Create trigger
         trigger_sql = sql.SQL("""
-            CREATE TRIGGER {}_scylla_replication_trigger
+            CREATE TRIGGER {}
             AFTER INSERT OR UPDATE OR DELETE ON {}.{}
             FOR EACH ROW
-            EXECUTE FUNCTION {}.{}_scylla_replication()
+            EXECUTE FUNCTION {}.{}()
         """).format(
-            sql.Identifier(f"{table_name}_scylla"),
+            sql.Identifier(f"{table_name}_scylla_replication_trigger"),
             sql.Identifier(source_schema),
             sql.Identifier(table_name),
             sql.Identifier(source_schema),
-            sql.Identifier(table_name)
+            sql.Identifier(f"{table_name}_scylla_replication")
         )
         
         cursor.execute(trigger_sql)
