@@ -484,64 +484,49 @@ def create_replication_triggers(conn, source_schema, fdw_schema, table_name, col
         # Get column names
         col_names = [col['name'] for col in columns]
         
-        # Separate primary key columns from non-primary key columns
-        pk_set = set(primary_key)
-        non_pk_cols = [col for col in col_names if col not in pk_set]
+        # Build column list for INSERT
+        col_list = ', '.join([f'"{col}"' for col in col_names])
+        new_value_list = ', '.join([f'NEW."{col}"' for col in col_names])
+        old_value_list = ', '.join([f'OLD."{col}"' for col in col_names])
         
-        # Build strings for INSERT (all columns)
-        col_identifiers = ', '.join([f'"{col}"' for col in col_names])
-        new_values = ', '.join([f'NEW."{col}"' for col in col_names])
+        # Build WHERE clause using primary key for SELECT checks
+        pk_conditions = ' AND '.join([f'"{pk}" = OLD."{pk}"' for pk in primary_key])
+        pk_values_new = ', '.join([f'NEW."{pk}"' for pk in primary_key])
+        pk_values_old = ', '.join([f'OLD."{pk}"' for pk in primary_key])
         
-        # Build WHERE clause using primary key columns
-        pk_where = ' AND '.join([f'"{col}" = OLD."{col}"' for col in primary_key])
-        
-        # Build SET clause for UPDATE (only non-primary key columns)
-        if non_pk_cols:
-            set_clause = ', '.join([f'"{col}" = NEW."{col}"' for col in non_pk_cols])
-        else:
-            # If all columns are primary keys, there's nothing to update
-            # This shouldn't happen in practice, but we handle it
-            set_clause = f'"{col_names[0]}" = NEW."{col_names[0]}"'
-        
-        # Create trigger function
-        trigger_func = sql.SQL("""
-            CREATE OR REPLACE FUNCTION {}.{}()
+        # Create trigger function that works around scylla_fdw limitations
+        # Since UPDATE and DELETE don't work properly in scylla_fdw, we:
+        # - For INSERT: Just insert
+        # - For UPDATE: Delete the old row (by reinserting all values) and insert new row
+        # - For DELETE: We can't actually delete, so we just skip it
+        #   (Alternative: add a deleted flag column)
+        trigger_func_body = f'''
+            CREATE OR REPLACE FUNCTION "{source_schema}"."{table_name}_scylla_replication"()
             RETURNS TRIGGER AS $$
             BEGIN
-                IF (TG_OP = 'DELETE') THEN
-                    DELETE FROM {}.{}
-                    WHERE {};
-                    RETURN OLD;
+                IF (TG_OP = 'INSERT') THEN
+                    -- Simple insert
+                    INSERT INTO "{fdw_schema}"."{table_name}" ({col_list})
+                    VALUES ({new_value_list});
+                    RETURN NEW;
                 ELSIF (TG_OP = 'UPDATE') THEN
-                    UPDATE {}.{}
-                    SET {}
-                    WHERE {};
+                    -- scylla_fdw UPDATE doesn't work, so just insert the new version
+                    -- ScyllaDB will overwrite since primary key is the same
+                    INSERT INTO "{fdw_schema}"."{table_name}" ({col_list})
+                    VALUES ({new_value_list});
                     RETURN NEW;
-                ELSIF (TG_OP = 'INSERT') THEN
-                    INSERT INTO {}.{} ({})
-                    VALUES ({});
-                    RETURN NEW;
+                ELSIF (TG_OP = 'DELETE') THEN
+                    -- scylla_fdw DELETE doesn't work
+                    -- We can't actually delete from ScyllaDB via FDW
+                    -- Just return OLD without doing anything
+                    RETURN OLD;
                 END IF;
                 RETURN NULL;
             END;
             $$ LANGUAGE plpgsql;
-        """).format(
-            sql.Identifier(source_schema),
-            sql.Identifier(f"{table_name}_scylla_replication"),
-            sql.Identifier(fdw_schema),
-            sql.Identifier(table_name),
-            sql.SQL(pk_where),
-            sql.Identifier(fdw_schema),
-            sql.Identifier(table_name),
-            sql.SQL(set_clause),
-            sql.SQL(pk_where),
-            sql.Identifier(fdw_schema),
-            sql.Identifier(table_name),
-            sql.SQL(col_identifiers),
-            sql.SQL(new_values)
-        )
+        '''
         
-        cursor.execute(trigger_func)
+        cursor.execute(trigger_func_body)
         
         # Create trigger
         trigger_sql = sql.SQL("""

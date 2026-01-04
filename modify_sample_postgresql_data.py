@@ -37,6 +37,11 @@ def main():
     
     # Perform operations
     print(f"\n{'=' * 70}")
+    print("Cleaning up existing test data...")
+    print("=" * 70)
+    cleanup_test_data(conn, args.postgres_source_schema)
+    
+    print(f"\n{'=' * 70}")
     print("Performing INSERT operations...")
     print("=" * 70)
     insert_operations(conn, args.postgres_source_schema)
@@ -90,6 +95,42 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def cleanup_test_data(conn, schema):
+    """Clean up any existing test data from previous runs."""
+    cursor = conn.cursor()
+    
+    try:
+        # Delete test data (IDs 10001-10999)
+        print("\n[1/3] Cleaning up test animals...")
+        cursor.execute(
+            sql.SQL("DELETE FROM {}.animals WHERE animal_id >= 10000 AND animal_id < 11000").format(
+                sql.Identifier(schema)
+            )
+        )
+        print(f"  ✓ Cleaned up test animals")
+        
+        print("\n[2/3] Cleaning up test habitats...")
+        cursor.execute(
+            sql.SQL("DELETE FROM {}.habitats WHERE habitat_id >= 10000 AND habitat_id < 11000").format(
+                sql.Identifier(schema)
+            )
+        )
+        print(f"  ✓ Cleaned up test habitats")
+        
+        print("\n[3/3] Cleaning up test feedings...")
+        cursor.execute(
+            sql.SQL("DELETE FROM {}.feedings WHERE feeding_id >= 10000 AND feeding_id < 11000").format(
+                sql.Identifier(schema)
+            )
+        )
+        print(f"  ✓ Cleaned up test feedings")
+        
+    except Exception as e:
+        print(f"  ⚠ Warning during cleanup: {e}")
+    finally:
+        cursor.close()
+
+
 def insert_operations(conn, schema):
     """Perform INSERT operations on sample tables."""
     cursor = conn.cursor()
@@ -104,13 +145,16 @@ def insert_operations(conn, schema):
         ]
         
         for animal in animals_data:
-            cursor.execute(
-                sql.SQL("INSERT INTO {}.animals (animal_id, name, species, age, weight_kg, habitat_name, last_checkup) VALUES (%s, %s, %s, %s, %s, %s, %s)").format(
-                    sql.Identifier(schema)
-                ),
-                animal
-            )
-            print(f"  ✓ Inserted animal: {animal[1]} (ID: {animal[0]})")
+            try:
+                cursor.execute(
+                    sql.SQL("INSERT INTO {}.animals (animal_id, name, species, age, weight_kg, habitat_name, last_checkup) VALUES (%s, %s, %s, %s, %s, %s, %s)").format(
+                        sql.Identifier(schema)
+                    ),
+                    animal
+                )
+                print(f"  ✓ Inserted animal: {animal[1]} (ID: {animal[0]})")
+            except Exception as e:
+                print(f"  ✗ Failed to insert animal {animal[1]}: {e}")
         
         # Insert new habitats
         print("\n[2/3] Inserting new habitats...")
@@ -120,13 +164,16 @@ def insert_operations(conn, schema):
         ]
         
         for habitat in habitats_data:
-            cursor.execute(
-                sql.SQL("INSERT INTO {}.habitats (habitat_id, name, climate, size_acres, capacity, built_date) VALUES (%s, %s, %s, %s, %s, %s)").format(
-                    sql.Identifier(schema)
-                ),
-                habitat
-            )
-            print(f"  ✓ Inserted habitat: {habitat[1]} (ID: {habitat[0]})")
+            try:
+                cursor.execute(
+                    sql.SQL("INSERT INTO {}.habitats (habitat_id, name, climate, size_acres, capacity, built_date) VALUES (%s, %s, %s, %s, %s, %s)").format(
+                        sql.Identifier(schema)
+                    ),
+                    habitat
+                )
+                print(f"  ✓ Inserted habitat: {habitat[1]} (ID: {habitat[0]})")
+            except Exception as e:
+                print(f"  ✗ Failed to insert habitat {habitat[1]}: {e}")
         
         # Insert new feedings
         print("\n[3/3] Inserting new feedings...")
@@ -136,13 +183,16 @@ def insert_operations(conn, schema):
         ]
         
         for feeding in feedings_data:
-            cursor.execute(
-                sql.SQL("INSERT INTO {}.feedings (feeding_id, animal_name, food_type, quantity_kg, feeding_time, fed_by) VALUES (%s, %s, %s, %s, %s, %s)").format(
-                    sql.Identifier(schema)
-                ),
-                feeding
-            )
-            print(f"  ✓ Inserted feeding: {feeding[1]} - {feeding[2]} (ID: {feeding[0]})")
+            try:
+                cursor.execute(
+                    sql.SQL("INSERT INTO {}.feedings (feeding_id, animal_name, food_type, quantity_kg, feeding_time, fed_by) VALUES (%s, %s, %s, %s, %s, %s)").format(
+                        sql.Identifier(schema)
+                    ),
+                    feeding
+                )
+                print(f"  ✓ Inserted feeding: {feeding[1]} - {feeding[2]} (ID: {feeding[0]})")
+            except Exception as e:
+                print(f"  ✗ Failed to insert feeding for {feeding[1]}: {e}")
         
     except Exception as e:
         print(f"  ✗ Error during INSERT operations: {e}")
