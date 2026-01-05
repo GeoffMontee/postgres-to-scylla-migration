@@ -24,20 +24,20 @@ def main():
     print("=" * 70)
     
     # Step 1: Install scylla_fdw on PostgreSQL container
-    print("\n[1/4] Installing scylla_fdw on PostgreSQL container...")
+    print("\n[1/5] Installing scylla_fdw on PostgreSQL container...")
     install_scylla_fdw(args)
     
     # Step 2: Connect to databases
-    print("\n[2/4] Connecting to databases...")
+    print("\n[2/5] Connecting to databases...")
     pg_conn = connect_to_postgres(args)
     scylla_session = connect_to_scylla(args)
     
     # Step 3: Setup FDW infrastructure
-    print("\n[3/4] Setting up FDW infrastructure...")
+    print("\n[3/5] Setting up FDW infrastructure...")
     setup_fdw_infrastructure(pg_conn, args)
     
     # Step 4: Migrate tables
-    print("\n[4/4] Setting up table migration...")
+    print("\n[4/5] Setting up table migration...")
     tables = get_source_tables(pg_conn, args.postgres_source_schema)
     
     if not tables:
@@ -51,6 +51,11 @@ def main():
     for table in tables:
         print(f"\nProcessing table: {table}")
         setup_table_migration(pg_conn, scylla_session, table, args)
+    
+    # Step 5: Migrate existing data
+    print("\n[5/5] Migrating existing data...")
+    for table in tables:
+        migrate_table_data(pg_conn, args.postgres_source_schema, args.postgres_fdw_schema, table)
     
     # Cleanup
     pg_conn.close()
@@ -564,6 +569,54 @@ def create_replication_triggers(conn, source_schema, fdw_schema, table_name, col
     except Exception as e:
         print(f"    ✗ Error creating triggers: {e}")
         raise
+    finally:
+        cursor.close()
+
+
+def migrate_table_data(conn, source_schema, fdw_schema, table_name):
+    """
+    Migrate existing data from source table to foreign table.
+    
+    Args:
+        conn: PostgreSQL connection
+        source_schema: Source schema containing the original table
+        fdw_schema: FDW schema containing the foreign table
+        table_name: Name of the table to migrate
+    """
+    cursor = conn.cursor()
+    try:
+        print(f"\n  Migrating data for table '{table_name}'...")
+        
+        # Count rows in source table
+        cursor.execute(
+            sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                sql.Identifier(source_schema),
+                sql.Identifier(table_name)
+            )
+        )
+        row_count = cursor.fetchone()[0]
+        
+        if row_count == 0:
+            print(f"    ⚠ No data to migrate (table is empty)")
+            return
+        
+        print(f"    Found {row_count} row(s) to migrate")
+        
+        # Insert all data from source to foreign table
+        cursor.execute(
+            sql.SQL("INSERT INTO {}.{} SELECT * FROM {}.{}").format(
+                sql.Identifier(fdw_schema),
+                sql.Identifier(table_name),
+                sql.Identifier(source_schema),
+                sql.Identifier(table_name)
+            )
+        )
+        
+        print(f"    ✓ Migrated {row_count} row(s) to ScyllaDB")
+        
+    except Exception as e:
+        print(f"    ✗ Error migrating data: {e}")
+        # Don't raise - allow other tables to continue
     finally:
         cursor.close()
 
