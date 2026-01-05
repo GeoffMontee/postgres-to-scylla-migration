@@ -78,6 +78,7 @@ Sets up the migration infrastructure between PostgreSQL and ScyllaDB.
   - Creates a matching ScyllaDB table
   - Creates a foreign table in PostgreSQL
   - Sets up INSERT/UPDATE/DELETE triggers for automatic replication
+  - Migrates all existing data from PostgreSQL to ScyllaDB
 
 **Usage:**
 ```bash
@@ -242,10 +243,11 @@ SELECT * FROM animals WHERE animal_id = 9999;
 The project includes sample animal-themed schema and data:
 
 ### sample_postgresql_schema.sql
-Creates 3 tables:
+Creates 4 tables:
 - `animals` - Animal records with species, age, weight
 - `habitats` - Habitat information with climate and capacity
 - `feedings` - Feeding logs with food types and quantities
+- `equipment` - Equipment records testing additional data types (BIGINT, SMALLINT, TEXT, REAL, DOUBLE PRECISION, BOOLEAN, UUID, INET, TIME)
 
 ### sample_postgresql_data.sql
 Generates 1000 rows per table using PostgreSQL's `generate_series()` function.

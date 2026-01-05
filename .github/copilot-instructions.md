@@ -60,7 +60,7 @@ PostgreSQL source table
 - `setup_migration.py` - Migration infrastructure setup and scylla_fdw installation
 - `destroy_db_containers.py` - Clean up all Docker containers and resources
 - `modify_sample_postgresql_data.py` - Test replication by modifying sample data
-- `sample_postgresql_schema.sql` - Example schema (animal-themed, 3 tables)
+- `sample_postgresql_schema.sql` - Example schema (animal-themed, 4 tables: animals, habitats, feedings, equipment)
 - `sample_postgresql_data.sql` - Sample data generation (1000 rows per table)
 
 ### Configuration
