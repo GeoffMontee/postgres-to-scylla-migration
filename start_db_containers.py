@@ -3,6 +3,7 @@
 Start and manage PostgreSQL and ScyllaDB containers for migration testing.
 """
 
+import argparse
 import os
 import sys
 import time
@@ -33,6 +34,8 @@ def ensure_network(client, network_name):
 
 def main():
     """Main function to start and manage database containers."""
+    args = parse_arguments()
+    
     try:
         client = docker.from_env()
     except Exception as e:
@@ -84,6 +87,11 @@ def main():
         "remove": False,
         "network": network_name
     }
+    
+    # Add debug capabilities if requested
+    if args.debug:
+        postgres_config["cap_add"] = ["SYS_PTRACE"]
+        postgres_config["security_opt"] = ["seccomp=unconfined"]
 
     scylla_config = {
         "name": "scylladb-migration-target",
@@ -99,18 +107,27 @@ def main():
         "command": "--smp 1 --memory 400M --overprovisioned 1 --api-address 0.0.0.0",
         "network": network_name
     }
+    
+    # Add debug capabilities if requested
+    if args.debug:
+        scylla_config["cap_add"] = ["SYS_PTRACE"]
+        scylla_config["security_opt"] = ["seccomp=unconfined"]
 
     # Manage PostgreSQL container
     print("=" * 60)
     print("Managing PostgreSQL container...")
+    if args.debug:
+        print("(Debug mode enabled)")
     print("=" * 60)
-    manage_container(client, postgres_config, db_type="postgresql")
+    manage_container(client, postgres_config, db_type="postgresql", debug=args.debug)
 
     # Manage ScyllaDB container
     print("\n" + "=" * 60)
     print("Managing ScyllaDB container...")
+    if args.debug:
+        print("(Debug mode enabled)")
     print("=" * 60)
-    manage_container(client, scylla_config, db_type="scylladb")
+    manage_container(client, scylla_config, db_type="scylladb", debug=args.debug)
 
     print("\n" + "=" * 60)
     print("All containers are ready!")
@@ -118,7 +135,7 @@ def main():
     print_connection_info()
 
 
-def manage_container(client, config, db_type=None):
+def manage_container(client, config, db_type=None, debug=False):
     """
     Manage a container - create if it doesn't exist, start if stopped, check health.
     
@@ -126,6 +143,7 @@ def manage_container(client, config, db_type=None):
         client: Docker client instance
         config: Dictionary with container configuration
         db_type: Type of database ('postgresql' or 'scylladb') for health checks
+        debug: Whether to install debug tools
     """
     container_name = config["name"]
     image_name = config["image"]
@@ -146,21 +164,23 @@ def manage_container(client, config, db_type=None):
             print(f"⚠ Container '{container_name}' is {status}, starting it...")
             container.start()
             print(f"✓ Container '{container_name}' started")
+            if debug and db_type == "postgresql":
+                install_postgresql_debug_tools(container)
             wait_for_health(container, container_name, db_type)
         else:
             print(f"⚠ Container '{container_name}' is in unexpected state: {status}")
             print("  Stopping and removing the container to recreate it...")
             container.stop(timeout=10)
             container.remove()
-            create_and_start_container(client, config, db_type)
+            create_and_start_container(client, config, db_type, debug)
 
     except NotFound:
         print(f"✗ Container '{container_name}' does not exist")
         print(f"  Creating new container...")
-        create_and_start_container(client, config, db_type)
+        create_and_start_container(client, config, db_type, debug)
 
 
-def create_and_start_container(client, config, db_type=None):
+def create_and_start_container(client, config, db_type=None, debug=False):
     """
     Pull image if needed and create/start a new container.
     
@@ -168,6 +188,7 @@ def create_and_start_container(client, config, db_type=None):
         client: Docker client instance
         config: Dictionary with container configuration
         db_type: Type of database ('postgresql' or 'scylladb') for health checks
+        debug: Whether to install debug tools
     """
     image_name = config["image"]
     container_name = config["name"]
@@ -186,6 +207,8 @@ def create_and_start_container(client, config, db_type=None):
     try:
         container = client.containers.run(**config)
         print(f"✓ Container '{container_name}' created and started")
+        if debug and db_type == "postgresql":
+            install_postgresql_debug_tools(container)
         wait_for_health(container, container_name, db_type)
     except Exception as e:
         print(f"✗ Error creating container: {e}")
@@ -348,6 +371,70 @@ def print_connection_info():
     print("  docker rm postgresql-migration-source scylladb-migration-target")
     print("\nTo remove the network:")
     print("  docker network rm migration-network")
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Start PostgreSQL and ScyllaDB containers for migration testing",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug mode: install gdb and debugging symbols, add ptrace capabilities')
+    
+    return parser.parse_args()
+
+
+def install_postgresql_debug_tools(container):
+    """
+    Install debugging tools and symbols in PostgreSQL container.
+    
+    Args:
+        container: Docker container instance
+    """
+    print("⟳ Installing debug tools in PostgreSQL container...")
+    
+    # Update package list
+    result = container.exec_run(["bash", "-c", "apt-get update"], demux=False)
+    if result.exit_code != 0:
+        print(f"  ⚠ Warning: Failed to update package list: {result.output.decode('utf-8')}")
+        return
+    
+    # Install gdb
+    print("  Installing gdb...")
+    result = container.exec_run(["bash", "-c", "apt-get install -y gdb"], demux=False)
+    if result.exit_code != 0:
+        print(f"  ⚠ Warning: Failed to install gdb: {result.output.decode('utf-8')}")
+        return
+    else:
+        print("  ✓ gdb installed")
+    
+    # Install PostgreSQL 18 debugging symbols
+    print("  Installing PostgreSQL 18 debugging symbols...")
+    result = container.exec_run(
+        ["bash", "-c", "apt-get install -y postgresql-18-dbgsym"],
+        demux=False
+    )
+    if result.exit_code != 0:
+        # Try alternative: add debug symbol repository and retry
+        print("  Adding debug symbol repository...")
+        container.exec_run([
+            "bash", "-c",
+            "echo 'deb http://deb.debian.org/debian-debug/ bookworm-debug main' >> /etc/apt/sources.list"
+        ])
+        container.exec_run(["bash", "-c", "apt-get update"])
+        result = container.exec_run(
+            ["bash", "-c", "apt-get install -y postgresql-18-dbgsym"],
+            demux=False
+        )
+        if result.exit_code != 0:
+            print(f"  ⚠ Warning: Could not install debugging symbols: {result.output.decode('utf-8')}")
+            print("  You may need to manually install them or use a different source")
+            return
+    
+    print("  ✓ PostgreSQL 18 debugging symbols installed")
+    print("✓ Debug tools installation complete")
 
 
 if __name__ == "__main__":
