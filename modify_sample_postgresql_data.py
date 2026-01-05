@@ -107,7 +107,7 @@ def cleanup_test_data(conn, schema):
     
     try:
         # Delete test data (IDs 10001-10999)
-        print("\n[1/3] Cleaning up test animals...")
+        print("\n[1/4] Cleaning up test animals...")
         cursor.execute(
             sql.SQL("DELETE FROM {}.animals WHERE animal_id >= 10000 AND animal_id < 11000").format(
                 sql.Identifier(schema)
@@ -115,7 +115,7 @@ def cleanup_test_data(conn, schema):
         )
         print(f"  ✓ Cleaned up test animals")
         
-        print("\n[2/3] Cleaning up test habitats...")
+        print("\n[2/4] Cleaning up test habitats...")
         cursor.execute(
             sql.SQL("DELETE FROM {}.habitats WHERE habitat_id >= 10000 AND habitat_id < 11000").format(
                 sql.Identifier(schema)
@@ -123,13 +123,21 @@ def cleanup_test_data(conn, schema):
         )
         print(f"  ✓ Cleaned up test habitats")
         
-        print("\n[3/3] Cleaning up test feedings...")
+        print("\n[3/4] Cleaning up test feedings...")
         cursor.execute(
             sql.SQL("DELETE FROM {}.feedings WHERE feeding_id >= 10000 AND feeding_id < 11000").format(
                 sql.Identifier(schema)
             )
         )
         print(f"  ✓ Cleaned up test feedings")
+        
+        print("\n[4/4] Cleaning up test equipment...")
+        cursor.execute(
+            sql.SQL("DELETE FROM {}.equipment WHERE equipment_id >= 10000 AND equipment_id < 11000").format(
+                sql.Identifier(schema)
+            )
+        )
+        print(f"  ✓ Cleaned up test equipment")
         
     except Exception as e:
         print(f"  ⚠ Warning during cleanup: {e}")
@@ -182,7 +190,7 @@ def insert_operations(conn, schema):
                 print(f"  ✗ Failed to insert habitat {habitat[1]}: {e}")
         
         # Insert new feedings
-        print("\n[3/3] Inserting new feedings...")
+        print("\n[3/4] Inserting new feedings...")
         feedings_data = [
             (10001, 'Test Lion', 'Meat', 15.5, '2026-01-04 08:00:00', 'Test Keeper'),
             (10002, 'Test Tiger', 'Chicken', 12.0, '2026-01-04 09:00:00', 'Test Keeper'),
@@ -199,6 +207,28 @@ def insert_operations(conn, schema):
                 print(f"  ✓ Inserted feeding: {feeding[1]} - {feeding[2]} (ID: {feeding[0]})")
             except Exception as e:
                 print(f"  ✗ Failed to insert feeding for {feeding[1]}: {e}")
+        
+        # Insert new equipment
+        print("\n[4/4] Inserting new equipment...")
+        cursor.execute("SELECT gen_random_uuid()")
+        test_uuid = cursor.fetchone()[0]
+        
+        equipment_data = [
+            (10001, 100, 'Test Pump', 'High capacity water pump', 22.5, 3.14159, True, test_uuid, '192.168.1.100', '10:30:00', 'New installation', '2026-01-04 10:00:00'),
+            (10002, 200, 'Test Sensor', 'Temperature monitoring sensor', 18.3, 2.71828, False, test_uuid, '192.168.1.101', '14:15:00', 'Needs calibration', '2026-01-04 11:00:00'),
+        ]
+        
+        for equip in equipment_data:
+            try:
+                cursor.execute(
+                    sql.SQL("INSERT INTO {}.equipment (equipment_id, item_code, name, description, temperature_celsius, precision_measurement, is_operational, device_uuid, ip_address, maintenance_time, maintenance_notes, installed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)").format(
+                        sql.Identifier(schema)
+                    ),
+                    equip
+                )
+                print(f"  ✓ Inserted equipment: {equip[2]} (ID: {equip[0]})")
+            except Exception as e:
+                print(f"  ✗ Failed to insert equipment {equip[2]}: {e}")
         
     except Exception as e:
         print(f"  ✗ Error during INSERT operations: {e}")
@@ -238,13 +268,30 @@ def update_operations(conn, schema):
         print(f"  ✓ Updated habitat capacity (ID: 10001)")
         
         # Update feedings
-        print("\n[3/3] Updating feedings...")
+        print("\n[3/4] Updating feedings...")
         cursor.execute(
             sql.SQL("UPDATE {}.feedings SET quantity_kg = 18.0 WHERE feeding_id = 10001").format(
                 sql.Identifier(schema)
             )
         )
         print(f"  ✓ Updated feeding quantity (ID: 10001)")
+        
+        # Update equipment
+        print("\n[4/4] Updating equipment...")
+        cursor.execute(
+            sql.SQL("UPDATE {}.equipment SET temperature_celsius = 25.0, is_operational = TRUE WHERE equipment_id = 10001").format(
+                sql.Identifier(schema)
+            )
+        )
+        print(f"  ✓ Updated equipment temperature and status (ID: 10001)")
+        
+        cursor.execute(
+            sql.SQL("UPDATE {}.equipment SET maintenance_notes = %s WHERE equipment_id = 10002").format(
+                sql.Identifier(schema)
+            ),
+            ['Calibrated and tested successfully']
+        )
+        print(f"  ✓ Updated equipment maintenance notes (ID: 10002)")
         
     except Exception as e:
         print(f"  ✗ Error during UPDATE operations: {e}")
@@ -258,7 +305,7 @@ def delete_operations(conn, schema):
     
     try:
         # Delete feedings first (no foreign keys, but logical order)
-        print("\n[1/3] Deleting feedings...")
+        print("\n[1/4] Deleting feedings...")
         cursor.execute(
             sql.SQL("DELETE FROM {}.feedings WHERE feeding_id = 10002").format(
                 sql.Identifier(schema)
@@ -267,7 +314,7 @@ def delete_operations(conn, schema):
         print(f"  ✓ Deleted feeding (ID: 10002)")
         
         # Delete animals
-        print("\n[2/3] Deleting animals...")
+        print("\n[2/4] Deleting animals...")
         cursor.execute(
             sql.SQL("DELETE FROM {}.animals WHERE animal_id = 10003").format(
                 sql.Identifier(schema)
@@ -276,13 +323,22 @@ def delete_operations(conn, schema):
         print(f"  ✓ Deleted animal (ID: 10003)")
         
         # Delete habitats
-        print("\n[3/3] Deleting habitats...")
+        print("\n[3/4] Deleting habitats...")
         cursor.execute(
             sql.SQL("DELETE FROM {}.habitats WHERE habitat_id = 10002").format(
                 sql.Identifier(schema)
             )
         )
         print(f"  ✓ Deleted habitat (ID: 10002)")
+        
+        # Delete equipment
+        print("\n[4/4] Deleting equipment...")
+        cursor.execute(
+            sql.SQL("DELETE FROM {}.equipment WHERE equipment_id = 10002").format(
+                sql.Identifier(schema)
+            )
+        )
+        print(f"  ✓ Deleted equipment (ID: 10002)")
         
     except Exception as e:
         print(f"  ✗ Error during DELETE operations: {e}")

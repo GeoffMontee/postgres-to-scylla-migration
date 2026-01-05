@@ -31,3 +31,19 @@ CREATE TABLE feedings (
     feeding_time TIMESTAMP,
     fed_by VARCHAR(100)
 );
+
+-- Equipment table (tests additional data types)
+CREATE TABLE equipment (
+    equipment_id BIGINT PRIMARY KEY,
+    item_code SMALLINT,
+    name TEXT,
+    description TEXT,
+    temperature_celsius REAL,
+    precision_measurement DOUBLE PRECISION,
+    is_operational BOOLEAN,
+    device_uuid UUID,
+    ip_address INET,
+    maintenance_time TIME,
+    maintenance_notes TEXT,
+    installed_at TIMESTAMP
+);

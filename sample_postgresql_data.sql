@@ -39,3 +39,21 @@ SELECT
     (ARRAY['John Smith', 'Jane Doe', 'Bob Johnson', 'Alice Williams', 'Charlie Brown', 
            'Diana Prince', 'Eve Adams', 'Frank Castle', 'Grace Hopper', 'Henry Ford'])[1 + (i % 10)]
 FROM generate_series(1, 1000) AS i;
+
+-- Insert 1000 equipment records (tests additional data types)
+INSERT INTO equipment (equipment_id, item_code, name, description, temperature_celsius, precision_measurement, 
+                      is_operational, device_uuid, ip_address, maintenance_time, maintenance_notes, installed_at)
+SELECT 
+    i::BIGINT,
+    (i % 32767)::SMALLINT,
+    (ARRAY['Water Pump', 'Heater', 'Cooler', 'Sensor', 'Camera', 'Feeder', 'Light', 'Filter', 'Monitor', 'Controller'])[1 + (i % 10)],
+    'Equipment item number ' || i || ' for facility operations',
+    (15.0 + (i % 50))::REAL,
+    (3.14159265359 + i * 0.001)::DOUBLE PRECISION,
+    (i % 2 = 0)::BOOLEAN,
+    gen_random_uuid(),
+    ('192.168.' || ((i % 254) + 1) || '.' || ((i % 254) + 1))::INET,
+    TIME '08:00:00' + (i % 480) * INTERVAL '1 minute',
+    'Maintenance log entry for equipment ' || i,
+    TIMESTAMP '2024-01-01 00:00:00' + (i % 365) * INTERVAL '1 day'
+FROM generate_series(1, 1000) AS i;
