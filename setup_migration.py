@@ -484,41 +484,42 @@ def create_replication_triggers(conn, source_schema, fdw_schema, table_name, col
         # Get column names
         col_names = [col['name'] for col in columns]
         
+        # Separate primary key columns from non-primary key columns
+        pk_set = set(primary_key)
+        non_pk_cols = [col for col in col_names if col not in pk_set]
+        
         # Build column list for INSERT
         col_list = ', '.join([f'"{col}"' for col in col_names])
         new_value_list = ', '.join([f'NEW."{col}"' for col in col_names])
-        old_value_list = ', '.join([f'OLD."{col}"' for col in col_names])
         
-        # Build WHERE clause using primary key for SELECT checks
+        # Build WHERE clause using primary key
         pk_conditions = ' AND '.join([f'"{pk}" = OLD."{pk}"' for pk in primary_key])
-        pk_values_new = ', '.join([f'NEW."{pk}"' for pk in primary_key])
-        pk_values_old = ', '.join([f'OLD."{pk}"' for pk in primary_key])
         
-        # Create trigger function that works around scylla_fdw limitations
-        # Since UPDATE and DELETE don't work properly in scylla_fdw, we:
-        # - For INSERT: Just insert
-        # - For UPDATE: Delete the old row (by reinserting all values) and insert new row
-        # - For DELETE: We can't actually delete, so we just skip it
-        #   (Alternative: add a deleted flag column)
+        # Build SET clause for UPDATE (only non-primary key columns)
+        if non_pk_cols:
+            set_clause = ', '.join([f'"{col}" = NEW."{col}"' for col in non_pk_cols])
+            update_statement = f'''UPDATE "{fdw_schema}"."{table_name}"
+                    SET {set_clause}
+                    WHERE {pk_conditions};'''
+        else:
+            # If there are no non-PK columns, UPDATE doesn't need to do anything
+            update_statement = '-- No columns to update besides primary key'
+        
+        # Create trigger function
         trigger_func_body = f'''
             CREATE OR REPLACE FUNCTION "{source_schema}"."{table_name}_scylla_replication"()
             RETURNS TRIGGER AS $$
             BEGIN
                 IF (TG_OP = 'INSERT') THEN
-                    -- Simple insert
                     INSERT INTO "{fdw_schema}"."{table_name}" ({col_list})
                     VALUES ({new_value_list});
                     RETURN NEW;
                 ELSIF (TG_OP = 'UPDATE') THEN
-                    -- scylla_fdw UPDATE doesn't work, so just insert the new version
-                    -- ScyllaDB will overwrite since primary key is the same
-                    INSERT INTO "{fdw_schema}"."{table_name}" ({col_list})
-                    VALUES ({new_value_list});
+                    {update_statement}
                     RETURN NEW;
                 ELSIF (TG_OP = 'DELETE') THEN
-                    -- scylla_fdw DELETE doesn't work
-                    -- We can't actually delete from ScyllaDB via FDW
-                    -- Just return OLD without doing anything
+                    DELETE FROM "{fdw_schema}"."{table_name}"
+                    WHERE {pk_conditions};
                     RETURN OLD;
                 END IF;
                 RETURN NULL;
