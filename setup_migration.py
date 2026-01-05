@@ -139,9 +139,24 @@ def install_scylla_fdw(args):
             print(f"    Running: {cmd}")
             result = container.exec_run(["bash", "-c", cmd])
             if result.exit_code != 0:
-                print(f"✗ Command failed with exit code {result.exit_code}")
-                print(f"Output: {result.output.decode('utf-8')}")
+                print(f"    ✗ Command failed with exit code {result.exit_code}")
+                output = result.output.decode('utf-8', errors='replace')
+                print(f"    Output:\n{output}")
                 sys.exit(1)
+            else:
+                # For certain commands, show output even on success
+                if any(x in cmd for x in ['make', 'cmake', 'git clone', 'git pull']):
+                    output = result.output.decode('utf-8', errors='replace')
+                    if output.strip():
+                        # Show last 20 lines of output for successful build commands
+                        lines = output.strip().split('\n')
+                        if len(lines) > 20:
+                            print(f"    ... (showing last 20 lines)")
+                            for line in lines[-20:]:
+                                print(f"    {line}")
+                        else:
+                            for line in lines:
+                                print(f"    {line}")
         
         print("  ✓ scylla_fdw installed successfully")
         
