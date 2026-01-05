@@ -1,6 +1,6 @@
 #!/bin/bash
 
-python3 ./destroy_db_containers.py
+python3 destroy_db_containers.py
 
 python3 start_db_containers.py --debug
 
