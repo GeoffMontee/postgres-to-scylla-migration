@@ -76,7 +76,7 @@ def main():
     # Configuration
     postgres_config = {
         "name": "postgresql-migration-source",
-        "image": "postgres:18",
+        "image": f"postgres:{args.postgres_version}",
         "ports": {"5432/tcp": 5432},
         "environment": {
             "POSTGRES_PASSWORD": "postgres",
@@ -119,7 +119,7 @@ def main():
     if args.debug:
         print("(Debug mode enabled)")
     print("=" * 60)
-    manage_container(client, postgres_config, db_type="postgresql", debug=args.debug)
+    manage_container(client, postgres_config, db_type="postgresql", debug=args.debug, postgres_version=args.postgres_version)
 
     # Manage ScyllaDB container
     print("\n" + "=" * 60)
@@ -135,7 +135,7 @@ def main():
     print_connection_info()
 
 
-def manage_container(client, config, db_type=None, debug=False):
+def manage_container(client, config, db_type=None, debug=False, postgres_version=18):
     """
     Manage a container - create if it doesn't exist, start if stopped, check health.
     
@@ -144,6 +144,7 @@ def manage_container(client, config, db_type=None, debug=False):
         config: Dictionary with container configuration
         db_type: Type of database ('postgresql' or 'scylladb') for health checks
         debug: Whether to install debug tools
+        postgres_version: PostgreSQL version number for package installation
     """
     container_name = config["name"]
     image_name = config["image"]
@@ -165,22 +166,22 @@ def manage_container(client, config, db_type=None, debug=False):
             container.start()
             print(f"✓ Container '{container_name}' started")
             if debug and db_type == "postgresql":
-                install_postgresql_debug_tools(container)
+                install_postgresql_debug_tools(container, postgres_version)
             wait_for_health(container, container_name, db_type)
         else:
             print(f"⚠ Container '{container_name}' is in unexpected state: {status}")
             print("  Stopping and removing the container to recreate it...")
             container.stop(timeout=10)
             container.remove()
-            create_and_start_container(client, config, db_type, debug)
+            create_and_start_container(client, config, db_type, debug, postgres_version)
 
     except NotFound:
         print(f"✗ Container '{container_name}' does not exist")
         print(f"  Creating new container...")
-        create_and_start_container(client, config, db_type, debug)
+        create_and_start_container(client, config, db_type, debug, postgres_version)
 
 
-def create_and_start_container(client, config, db_type=None, debug=False):
+def create_and_start_container(client, config, db_type=None, debug=False, postgres_version=18):
     """
     Pull image if needed and create/start a new container.
     
@@ -189,6 +190,7 @@ def create_and_start_container(client, config, db_type=None, debug=False):
         config: Dictionary with container configuration
         db_type: Type of database ('postgresql' or 'scylladb') for health checks
         debug: Whether to install debug tools
+        postgres_version: PostgreSQL version number for package installation
     """
     image_name = config["image"]
     container_name = config["name"]
@@ -208,7 +210,7 @@ def create_and_start_container(client, config, db_type=None, debug=False):
         container = client.containers.run(**config)
         print(f"✓ Container '{container_name}' created and started")
         if debug and db_type == "postgresql":
-            install_postgresql_debug_tools(container)
+            install_postgresql_debug_tools(container, postgres_version)
         wait_for_health(container, container_name, db_type)
     except Exception as e:
         print(f"✗ Error creating container: {e}")
@@ -382,18 +384,21 @@ def parse_arguments():
     
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug mode: install gdb and debugging symbols, add ptrace capabilities')
+    parser.add_argument('--postgres-version', type=int, default=18, choices=range(14, 19),
+                        help='PostgreSQL version to deploy (14-18, must be supported by scylla_fdw)')
     
     return parser.parse_args()
 
 
-def install_postgresql_debug_tools(container):
+def install_postgresql_debug_tools(container, postgres_version=18):
     """
     Install debugging tools and symbols in PostgreSQL container.
     
     Args:
         container: Docker container instance
+        postgres_version: PostgreSQL version number
     """
-    print("⟳ Installing debug tools in PostgreSQL container...")
+    print(f"⟳ Installing debug tools in PostgreSQL {postgres_version} container...")
     
     # Update package list
     result = container.exec_run(["bash", "-c", "apt-get update"], demux=False)
@@ -410,10 +415,10 @@ def install_postgresql_debug_tools(container):
     else:
         print("  ✓ gdb installed")
     
-    # Install PostgreSQL 18 debugging symbols
-    print("  Installing PostgreSQL 18 debugging symbols...")
+    # Install PostgreSQL debugging symbols
+    print(f"  Installing PostgreSQL {postgres_version} debugging symbols...")
     result = container.exec_run(
-        ["bash", "-c", "apt-get install -y postgresql-18-dbgsym"],
+        ["bash", "-c", f"apt-get install -y postgresql-{postgres_version}-dbgsym"],
         demux=False
     )
     if result.exit_code != 0:
@@ -425,7 +430,7 @@ def install_postgresql_debug_tools(container):
         ])
         container.exec_run(["bash", "-c", "apt-get update"])
         result = container.exec_run(
-            ["bash", "-c", "apt-get install -y postgresql-18-dbgsym"],
+            ["bash", "-c", f"apt-get install -y postgresql-{postgres_version}-dbgsym"],
             demux=False
         )
         if result.exit_code != 0:
@@ -433,7 +438,7 @@ def install_postgresql_debug_tools(container):
             print("  You may need to manually install them or use a different source")
             return
     
-    print("  ✓ PostgreSQL 18 debugging symbols installed")
+    print(f"  ✓ PostgreSQL {postgres_version} debugging symbols installed")
     print("✓ Debug tools installation complete")
 
 

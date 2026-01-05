@@ -51,15 +51,22 @@ Manages PostgreSQL and ScyllaDB Docker containers with automatic health checks.
 
 **Usage:**
 ```bash
-# Basic usage
+# Basic usage (PostgreSQL 18)
 python3 start_db_containers.py
+
+# Specific PostgreSQL version
+python3 start_db_containers.py --postgres-version 16
 
 # Debug mode (adds gdb, debugging symbols, ptrace capabilities)
 python3 start_db_containers.py --debug
+
+# Debug mode with specific version
+python3 start_db_containers.py --debug --postgres-version 14
 ```
 
 **Command-line Options:**
 - `--debug` - Enable debug mode: installs gdb and PostgreSQL debugging symbols, adds SYS_PTRACE capability and disables seccomp for both containers
+- `--postgres-version` - PostgreSQL version to deploy (14-18, default: 18). Must be supported by scylla_fdw
 
 **Connection Information:**
 - **PostgreSQL** (from host): `postgresql://postgres:postgres@localhost:5432/postgres`

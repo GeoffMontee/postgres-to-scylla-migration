@@ -122,12 +122,22 @@ def install_scylla_fdw(args):
         client = docker.from_env()
         container = client.containers.get(args.postgres_docker_container)
         
+        # Detect PostgreSQL version in the container
+        print(f"  Detecting PostgreSQL version...")
+        result = container.exec_run(["bash", "-c", "psql --version | grep -oP '\\d+' | head -1"])
+        if result.exit_code == 0:
+            pg_version = result.output.decode('utf-8').strip()
+            print(f"  Detected PostgreSQL version: {pg_version}")
+        else:
+            print(f"  ⚠ Could not detect PostgreSQL version, assuming 18")
+            pg_version = "18"
+        
         print(f"  Installing build dependencies...")
         
         # Install build dependencies
         commands = [
             "apt-get update",
-            "apt-get install -y build-essential postgresql-server-dev-18 git libssl-dev cmake libuv1-dev zlib1g-dev pkg-config curl",
+            f"apt-get install -y build-essential postgresql-server-dev-{pg_version} git libssl-dev cmake libuv1-dev zlib1g-dev pkg-config curl",
             # Install Rust compiler (required for cpp-rs-driver)
             "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
             # Build and install cpp-rs-driver (required by scylla_fdw)
