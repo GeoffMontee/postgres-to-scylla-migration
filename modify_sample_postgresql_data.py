@@ -65,7 +65,8 @@ def main():
     print("\nTo verify replication:")
     print(f"  PostgreSQL: SELECT * FROM {args.postgres_source_schema}.animals WHERE animal_id >= 10000;")
     print(f"  Foreign table: SELECT * FROM {args.postgres_fdw_schema}.animals WHERE animal_id >= 10000;")
-    print(f"  ScyllaDB: docker exec -it scylladb-migration-target cqlsh -e \"SELECT * FROM {args.scylla_ks}.animals WHERE animal_id >= 10000;\"")
+    print(f"  ScyllaDB: docker exec -it scylladb-migration-target cqlsh -e \"SELECT * FROM {args.scylla_ks}.animals WHERE animal_id >= 10000 ALLOW FILTERING;\"")
+
 
 
 def parse_arguments():
