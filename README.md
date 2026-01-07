@@ -10,6 +10,12 @@ This project provides automated tools to:
 - Create matching ScyllaDB tables from PostgreSQL schemas
 - Set up automatic replication triggers from PostgreSQL to ScyllaDB
 
+## Built on scylla_fdw
+
+This migration toolkit is built on top of [scylla_fdw](https://github.com/GeoffMontee/scylla_fdw/), a Foreign Data Wrapper (FDW) extension for PostgreSQL that enables seamless integration with ScyllaDB. The scylla_fdw extension allows PostgreSQL to directly access ScyllaDB tables as if they were native PostgreSQL tables, enabling real-time data replication through triggers and foreign tables.
+
+For more information about scylla_fdw, including its features, limitations, and configuration options, visit the [scylla_fdw GitHub repository](https://github.com/GeoffMontee/scylla_fdw/).
+
 ## Prerequisites
 
 ### Required Software

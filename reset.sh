@@ -2,7 +2,7 @@
 
 python3 destroy_db_containers.py
 
-python3 start_db_containers.py --debug
+python3 start_db_containers.py --debug --postgres-version 18
 
 # Load schema
 psql -h localhost -U postgres -d postgres < sample_postgresql_schema.sql
