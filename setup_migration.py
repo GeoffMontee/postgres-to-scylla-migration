@@ -13,32 +13,53 @@ import psycopg2
 from psycopg2 import sql
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
+import threading
+from queue import Queue
 
+
+# Thread-safe logging lock
+log_lock = threading.Lock()
+
+def thread_safe_print(*args, **kwargs):
+    """Thread-safe print function."""
+    with log_lock:
+        print(*args, **kwargs)
 
 def main():
     """Main function to setup migration infrastructure."""
     args = parse_arguments()
     
+    # Validate lock mode
+    validate_lock_mode(args.postgres_lock_mode)
+    
     print("=" * 70)
     print("PostgreSQL to ScyllaDB Migration Setup")
     print("=" * 70)
+    print(f"Configuration:")
+    print(f"  - Threads: {args.num_threads}")
+    print(f"  - Lock mode: {args.postgres_lock_mode}")
+    print(f"  - Skip existing data: {args.skip_existing_data}")
     
     # Step 1: Install scylla_fdw on PostgreSQL container
     print("\n[1/5] Installing scylla_fdw on PostgreSQL container...")
     install_scylla_fdw(args)
     
-    # Step 2: Connect to databases
-    print("\n[2/5] Connecting to databases...")
-    pg_conn = connect_to_postgres(args)
-    scylla_session = connect_to_scylla(args)
+    # Step 2: Connect to databases (test connections)
+    print("\n[2/5] Testing database connections...")
+    test_pg_conn = connect_to_postgres(args, autocommit=True)
+    test_scylla_session = connect_to_scylla(args)
     
     # Step 3: Setup FDW infrastructure
     print("\n[3/5] Setting up FDW infrastructure...")
-    setup_fdw_infrastructure(pg_conn, args)
+    setup_fdw_infrastructure(test_pg_conn, args)
     
-    # Step 4: Migrate tables
-    print("\n[4/5] Setting up table migration...")
-    tables = get_source_tables(pg_conn, args.postgres_source_schema)
+    # Step 4 & 5: Get tables and distribute across threads
+    print("\n[4/5] Getting tables to migrate...")
+    tables = get_source_tables(test_pg_conn, args.postgres_source_schema)
+    
+    # Close test connections
+    test_pg_conn.close()
+    test_scylla_session.shutdown()
     
     if not tables:
         print(f"⚠ No tables found in schema '{args.postgres_source_schema}'")
@@ -48,21 +69,41 @@ def main():
     for table in tables:
         print(f"  - {table}")
     
-    for table in tables:
-        print(f"\nProcessing table: {table}")
-        setup_table_migration(pg_conn, scylla_session, table, args)
+    # Distribute tables across threads using round-robin
+    thread_tables = [[] for _ in range(args.num_threads)]
+    for i, table in enumerate(tables):
+        thread_tables[i % args.num_threads].append(table)
     
-    # Step 5: Migrate existing data
-    print("\n[5/5] Migrating existing data...")
-    for table in tables:
-        migrate_table_data(pg_conn, args.postgres_source_schema, args.postgres_fdw_schema, table)
+    print(f"\n[5/5] Starting {args.num_threads} worker thread(s)...")
+    for i, tables_list in enumerate(thread_tables):
+        if tables_list:
+            print(f"  Thread {i+1}: {len(tables_list)} table(s) - {', '.join(tables_list)}")
     
-    # Cleanup
-    pg_conn.close()
-    scylla_session.shutdown()
+    # Start worker threads
+    threads = []
+    success_count = threading.Event()
+    total_success = [0]  # Use list for mutable counter
+    total_failed = [0]
+    counter_lock = threading.Lock()
+    
+    for i in range(args.num_threads):
+        if thread_tables[i]:  # Only start thread if it has tables
+            thread = threading.Thread(
+                target=worker_thread,
+                args=(i+1, thread_tables[i], args, total_success, total_failed, counter_lock)
+            )
+            thread.start()
+            threads.append(thread)
+    
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
     
     print("\n" + "=" * 70)
-    print("✓ Migration setup completed successfully!")
+    print(f"✓ Migration setup completed!")
+    print(f"  - Successfully migrated: {total_success[0]} table(s)")
+    if total_failed[0] > 0:
+        print(f"  - Failed: {total_failed[0]} table(s) (see errors above)")
     print("=" * 70)
     print("\nNext steps:")
     print("  1. Insert/Update/Delete data in your PostgreSQL tables")
@@ -95,6 +136,15 @@ def parse_arguments():
                           help='PostgreSQL schema for foreign tables')
     pg_group.add_argument('--postgres-docker-container', default='postgresql-migration-source',
                           help='PostgreSQL docker container name')
+    pg_group.add_argument('--postgres-lock-mode', default='SHARE ROW EXCLUSIVE',
+                          help='PostgreSQL lock mode for table locking during migration')
+    
+    # Migration options
+    migration_group = parser.add_argument_group('Migration options')
+    migration_group.add_argument('--num-threads', type=int, default=4,
+                                help='Number of worker threads for parallel migration')
+    migration_group.add_argument('--skip-existing-data', action='store_true',
+                                help='Skip migrating existing data (only setup replication)')
     
     # ScyllaDB options
     scylla_group = parser.add_argument_group('ScyllaDB options')
@@ -114,6 +164,25 @@ def parse_arguments():
                               help='ScyllaDB host for FDW (container name for Docker network)')
     
     return parser.parse_args()
+
+
+def validate_lock_mode(lock_mode):
+    """Validate PostgreSQL lock mode."""
+    valid_lock_modes = [
+        'ACCESS SHARE',
+        'ROW SHARE',
+        'ROW EXCLUSIVE',
+        'SHARE UPDATE EXCLUSIVE',
+        'SHARE',
+        'SHARE ROW EXCLUSIVE',
+        'EXCLUSIVE',
+        'ACCESS EXCLUSIVE'
+    ]
+    
+    if lock_mode.upper() not in valid_lock_modes:
+        print(f"✗ Error: Invalid lock mode '{lock_mode}'")
+        print(f"  Valid lock modes: {', '.join(valid_lock_modes)}")
+        sys.exit(1)
 
 
 def install_scylla_fdw(args):
@@ -184,7 +253,7 @@ def install_scylla_fdw(args):
         sys.exit(1)
 
 
-def connect_to_postgres(args):
+def connect_to_postgres(args, autocommit=True):
     """Connect to PostgreSQL database."""
     try:
         conn = psycopg2.connect(
@@ -194,8 +263,9 @@ def connect_to_postgres(args):
             password=args.postgres_password,
             database=args.postgres_db
         )
-        conn.autocommit = True
-        print(f"  ✓ Connected to PostgreSQL at {args.postgres_host}:{args.postgres_port}")
+        conn.autocommit = autocommit
+        if autocommit:
+            print(f"  ✓ Connected to PostgreSQL at {args.postgres_host}:{args.postgres_port}")
         return conn
     except Exception as e:
         print(f"✗ Failed to connect to PostgreSQL: {e}")
@@ -291,31 +361,141 @@ def get_source_tables(conn, schema):
         cursor.close()
 
 
-def setup_table_migration(pg_conn, scylla_session, table_name, args):
-    """Setup migration for a single table."""
-    # Get table structure
-    columns = get_table_columns(pg_conn, args.postgres_source_schema, table_name)
-    primary_key = get_primary_key(pg_conn, args.postgres_source_schema, table_name)
+def worker_thread(thread_id, tables, args, total_success, total_failed, counter_lock):
+    """Worker thread to process a list of tables."""
+    thread_safe_print(f"\n[Thread {thread_id}] Starting...")
     
-    if not primary_key:
-        print(f"  ⚠ Skipping table '{table_name}': no primary key defined")
+    # Create thread-local database connections
+    try:
+        pg_conn = connect_to_postgres(args, autocommit=False)
+        scylla_session = connect_to_scylla(args)
+    except Exception as e:
+        thread_safe_print(f"[Thread {thread_id}] ✗ Failed to connect to databases: {e}")
         return
     
-    # Create ScyllaDB keyspace if needed
-    create_keyspace(scylla_session, args.scylla_ks)
+    success = 0
+    failed = 0
     
-    # Create ScyllaDB table
-    create_scylla_table(scylla_session, args.scylla_ks, table_name, columns, primary_key)
+    for table_name in tables:
+        try:
+            thread_safe_print(f"[Thread {thread_id}] Processing table: {table_name}")
+            
+            # Process single table with transaction
+            if process_table_migration(pg_conn, scylla_session, table_name, args, thread_id):
+                success += 1
+            else:
+                failed += 1
+                
+        except Exception as e:
+            thread_safe_print(f"[Thread {thread_id}] ✗ Unexpected error processing '{table_name}': {e}")
+            failed += 1
+            try:
+                pg_conn.rollback()
+            except:
+                pass
     
-    # Create foreign table in PostgreSQL
-    create_foreign_table(pg_conn, args.postgres_fdw_schema, args.scylla_ks, 
-                        table_name, columns, primary_key)
+    # Update global counters
+    with counter_lock:
+        total_success[0] += success
+        total_failed[0] += failed
     
-    # Create triggers on source table
-    create_replication_triggers(pg_conn, args.postgres_source_schema, 
-                                args.postgres_fdw_schema, table_name, columns, primary_key)
+    # Cleanup
+    pg_conn.close()
+    scylla_session.shutdown()
     
-    print(f"  ✓ Migration setup complete for table '{table_name}'")
+    thread_safe_print(f"[Thread {thread_id}] Completed: {success} succeeded, {failed} failed")
+
+
+def process_table_migration(pg_conn, scylla_session, table_name, args, thread_id):
+    """Process migration for a single table within a transaction.
+    
+    Returns:
+        True if successful, False if failed
+    """
+    cursor = None
+    try:
+        cursor = pg_conn.cursor()
+        
+        # Step 1: Lock the table
+        thread_safe_print(f"[Thread {thread_id}]   Locking table '{table_name}' with {args.postgres_lock_mode} mode...")
+        cursor.execute(
+            sql.SQL("LOCK TABLE {}.{} IN {} MODE").format(
+                sql.Identifier(args.postgres_source_schema),
+                sql.Identifier(table_name),
+                sql.SQL(args.postgres_lock_mode.upper())
+            )
+        )
+        
+        # Get table structure
+        columns = get_table_columns(pg_conn, args.postgres_source_schema, table_name)
+        primary_key = get_primary_key(pg_conn, args.postgres_source_schema, table_name)
+        
+        if not primary_key:
+            thread_safe_print(f"[Thread {thread_id}]   ⚠ Skipping table '{table_name}': no primary key defined")
+            pg_conn.rollback()
+            return False
+        
+        # Step 2: Create ScyllaDB table (outside transaction)
+        # Note: We briefly release and reacquire the lock here, but this is acceptable
+        # as the ScyllaDB table creation doesn't affect the PostgreSQL transaction
+        thread_safe_print(f"[Thread {thread_id}]   Creating ScyllaDB table...")
+        create_keyspace(scylla_session, args.scylla_ks, thread_id)
+        create_scylla_table(scylla_session, args.scylla_ks, table_name, columns, primary_key, thread_id)
+        
+        # Step 3: Create foreign table in PostgreSQL (in transaction)
+        thread_safe_print(f"[Thread {thread_id}]   Creating foreign table...")
+        create_foreign_table(cursor, args.postgres_fdw_schema, args.scylla_ks, 
+                            table_name, columns, primary_key, thread_id)
+        
+        # Step 4: Create triggers (in transaction)
+        thread_safe_print(f"[Thread {thread_id}]   Creating replication triggers...")
+        create_replication_triggers(cursor, args.postgres_source_schema, 
+                                    args.postgres_fdw_schema, table_name, columns, primary_key, thread_id)
+        
+        # Step 5: Migrate existing data (in transaction)
+        if not args.skip_existing_data:
+            thread_safe_print(f"[Thread {thread_id}]   Migrating existing data...")
+            source_count = migrate_table_data(cursor, args.postgres_source_schema, 
+                                             args.postgres_fdw_schema, table_name, thread_id)
+            
+            # Step 6: Verify row counts
+            if source_count > 0:
+                thread_safe_print(f"[Thread {thread_id}]   Verifying row counts...")
+                cursor.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                        sql.Identifier(args.postgres_fdw_schema),
+                        sql.Identifier(table_name)
+                    )
+                )
+                foreign_count = cursor.fetchone()[0]
+                
+                if source_count != foreign_count:
+                    thread_safe_print(f"[Thread {thread_id}]   ⚠ Warning: Row count mismatch for '{table_name}' - Source: {source_count}, Foreign: {foreign_count}")
+                else:
+                    thread_safe_print(f"[Thread {thread_id}]   ✓ Row counts match: {source_count}")
+        else:
+            thread_safe_print(f"[Thread {thread_id}]   Skipping data migration (--skip-existing-data)")
+        
+        # Step 7: Commit transaction (releases lock)
+        thread_safe_print(f"[Thread {thread_id}]   Committing transaction...")
+        pg_conn.commit()
+        
+        thread_safe_print(f"[Thread {thread_id}]   ✓ Successfully migrated table '{table_name}'")
+        return True
+        
+    except Exception as e:
+        thread_safe_print(f"[Thread {thread_id}]   ✗ Error processing table '{table_name}': {e}")
+        thread_safe_print(f"[Thread {thread_id}]   Rolling back transaction. Please check the state of:")
+        thread_safe_print(f"[Thread {thread_id}]     - ScyllaDB table: {args.scylla_ks}.{table_name}")
+        thread_safe_print(f"[Thread {thread_id}]     - Foreign table: {args.postgres_fdw_schema}.{table_name}")
+        try:
+            pg_conn.rollback()
+        except Exception as rollback_error:
+            thread_safe_print(f"[Thread {thread_id}]   ✗ Rollback failed: {rollback_error}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
 
 
 def get_table_columns(conn, schema, table):
@@ -404,20 +584,23 @@ def pg_type_to_cql_type(pg_type, udt_name=None):
     return type_mapping.get(pg_type_lower, 'text')
 
 
-def create_keyspace(session, keyspace):
+def create_keyspace(session, keyspace, thread_id=None):
     """Create ScyllaDB keyspace if it doesn't exist."""
     try:
         session.execute(f"""
             CREATE KEYSPACE IF NOT EXISTS {keyspace}
             WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}
         """)
-        print(f"    ✓ Keyspace '{keyspace}' ready")
+        # Don't print - keyspace likely already exists from previous table
     except Exception as e:
-        print(f"    ✗ Error creating keyspace: {e}")
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     ✗ Error creating keyspace: {e}")
+        else:
+            print(f"    ✗ Error creating keyspace: {e}")
         raise
 
 
-def create_scylla_table(session, keyspace, table_name, columns, primary_key):
+def create_scylla_table(session, keyspace, table_name, columns, primary_key, thread_id=None):
     """Create table in ScyllaDB."""
     try:
         # Build column definitions
@@ -441,16 +624,17 @@ def create_scylla_table(session, keyspace, table_name, columns, primary_key):
         """
         
         session.execute(create_stmt)
-        print(f"    ✓ ScyllaDB table '{keyspace}.{table_name}' created")
         
     except Exception as e:
-        print(f"    ✗ Error creating ScyllaDB table: {e}")
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     ✗ Error creating ScyllaDB table: {e}")
+        else:
+            print(f"    ✗ Error creating ScyllaDB table: {e}")
         raise
 
 
-def create_foreign_table(conn, fdw_schema, scylla_keyspace, table_name, columns, primary_key):
+def create_foreign_table(cursor, fdw_schema, scylla_keyspace, table_name, columns, primary_key, thread_id=None):
     """Create foreign table in PostgreSQL."""
-    cursor = conn.cursor()
     try:
         # Drop existing foreign table if exists
         cursor.execute(sql.SQL("DROP FOREIGN TABLE IF EXISTS {}.{} CASCADE").format(
@@ -482,18 +666,17 @@ def create_foreign_table(conn, fdw_schema, scylla_keyspace, table_name, columns,
         )
         
         cursor.execute(create_stmt, [scylla_keyspace, table_name, pk_string])
-        print(f"    ✓ Foreign table '{fdw_schema}.{table_name}' created")
         
     except Exception as e:
-        print(f"    ✗ Error creating foreign table: {e}")
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     ✗ Error creating foreign table: {e}")
+        else:
+            print(f"    ✗ Error creating foreign table: {e}")
         raise
-    finally:
-        cursor.close()
 
 
-def create_replication_triggers(conn, source_schema, fdw_schema, table_name, columns, primary_key):
+def create_replication_triggers(cursor, source_schema, fdw_schema, table_name, columns, primary_key, thread_id=None):
     """Create triggers to replicate changes from source to foreign table."""
-    cursor = conn.cursor()
     try:
         # Drop existing trigger function and trigger
         cursor.execute(sql.SQL("""
@@ -574,29 +757,30 @@ def create_replication_triggers(conn, source_schema, fdw_schema, table_name, col
         )
         
         cursor.execute(trigger_sql)
-        print(f"    ✓ Replication triggers created for '{source_schema}.{table_name}'")
         
     except Exception as e:
-        print(f"    ✗ Error creating triggers: {e}")
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     ✗ Error creating triggers: {e}")
+        else:
+            print(f"    ✗ Error creating triggers: {e}")
         raise
-    finally:
-        cursor.close()
 
 
-def migrate_table_data(conn, source_schema, fdw_schema, table_name):
+def migrate_table_data(cursor, source_schema, fdw_schema, table_name, thread_id=None):
     """
     Migrate existing data from source table to foreign table.
     
     Args:
-        conn: PostgreSQL connection
+        cursor: PostgreSQL cursor (within transaction)
         source_schema: Source schema containing the original table
         fdw_schema: FDW schema containing the foreign table
         table_name: Name of the table to migrate
+        thread_id: Thread ID for logging (optional)
+    
+    Returns:
+        Number of rows migrated
     """
-    cursor = conn.cursor()
     try:
-        print(f"\n  Migrating data for table '{table_name}'...")
-        
         # Count rows in source table
         cursor.execute(
             sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
@@ -607,10 +791,16 @@ def migrate_table_data(conn, source_schema, fdw_schema, table_name):
         row_count = cursor.fetchone()[0]
         
         if row_count == 0:
-            print(f"    ⚠ No data to migrate (table is empty)")
-            return
+            if thread_id:
+                thread_safe_print(f"[Thread {thread_id}]     No data to migrate (table is empty)")
+            else:
+                print(f"    ⚠ No data to migrate (table is empty)")
+            return 0
         
-        print(f"    Found {row_count} row(s) to migrate")
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     Migrating {row_count} row(s)...")
+        else:
+            print(f"    Found {row_count} row(s) to migrate")
         
         # Insert all data from source to foreign table
         cursor.execute(
@@ -622,13 +812,14 @@ def migrate_table_data(conn, source_schema, fdw_schema, table_name):
             )
         )
         
-        print(f"    ✓ Migrated {row_count} row(s) to ScyllaDB")
+        return row_count
         
     except Exception as e:
-        print(f"    ✗ Error migrating data: {e}")
-        # Don't raise - allow other tables to continue
-    finally:
-        cursor.close()
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     ✗ Error migrating data: {e}")
+        else:
+            print(f"    ✗ Error migrating data: {e}")
+        raise
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ This is a PostgreSQL to ScyllaDB migration toolkit that uses `scylla_fdw` (Forei
 3. **Docker network** (`migration-network`) - Enables inter-container communication
 4. **Foreign tables** - PostgreSQL tables that map to ScyllaDB tables via FDW
 5. **Triggers** - Automatic replication from source tables to foreign tables
+6. **Worker threads** - Parallel migration with round-robin table distribution
 
 ### Data Flow
 ```
@@ -21,9 +22,21 @@ PostgreSQL source table
       → ScyllaDB table
 ```
 
+### Migration Workflow (Per Table, Per Thread)
+```
+1. LOCK TABLE using configurable lock mode (e.g., SHARE ROW EXCLUSIVE)
+2. Create ScyllaDB table (outside transaction)
+3. Create foreign table (inside transaction)
+4. Create replication triggers (inside transaction)
+5. Migrate existing data: INSERT INTO foreign_tab SELECT * FROM local_tab
+6. Verify row counts match
+7. COMMIT (releases lock)
+```
+
 ## Key Technologies
 
 - **Python 3.8+** - All scripts written in Python
+- **Python threading** - Multi-threaded parallel migration
 - **Docker Python SDK** - Container management
 - **psycopg2** - PostgreSQL database adapter
 - **scylla-driver** - ScyllaDB Python driver (uses `cassandra` module namespace)
@@ -57,7 +70,13 @@ PostgreSQL source table
 
 ### Scripts
 - `start_db_containers.py` - Container lifecycle management with health checks
-- `setup_migration.py` - Migration infrastructure setup and scylla_fdw installation
+- `setup_migration.py` - **Multi-threaded** migration infrastructure setup with:
+  - Parallel table processing (default: 4 threads)
+  - Configurable table locking (default: SHARE ROW EXCLUSIVE)
+  - Optional skip of existing data migration
+  - Thread-safe logging with progress tracking
+  - Per-thread database connections
+  - Round-robin table distribution
 - `destroy_db_containers.py` - Clean up all Docker containers and resources
 - `modify_sample_postgresql_data.py` - Test replication by modifying sample data
 - `sample_postgresql_schema.sql` - Example schema (animal-themed, 4 tables: animals, habitats, feedings, equipment)
@@ -68,8 +87,68 @@ PostgreSQL source table
 - Default ScyllaDB: `localhost:9042`, no authentication
 - Default schemas: source = `public`, FDW = `scylla_fdw`
 - Default keyspace: `migration`
+- Default threads: 4 workers
+- Default lock mode: `SHARE ROW EXCLUSIVE`
 
 ## Code Patterns
+
+### Threading Patterns
+```python
+# Thread-safe logging
+log_lock = threading.Lock()
+
+def thread_safe_print(*args, **kwargs):
+    with log_lock:
+        print(*args, **kwargs)
+
+# Per-thread database connections (NOT thread-safe to share)
+def worker_thread(thread_id, tables, args, counters):
+    # Create separate connection for this thread
+    pg_conn = connect_to_postgres(args, autocommit=False)
+    scylla_session = connect_to_scylla(args)
+    
+    # Process tables with transaction per table
+    for table in tables:
+        cursor = pg_conn.cursor()
+        try:
+            # Lock table, create objects, migrate data
+            pg_conn.commit()  # Release lock
+        except:
+            pg_conn.rollback()  # Rollback on failure
+        finally:
+            cursor.close()
+    
+    # Cleanup thread resources
+    pg_conn.close()
+    scylla_session.shutdown()
+
+# Round-robin table distribution
+thread_tables = [[] for _ in range(num_threads)]
+for i, table in enumerate(tables):
+    thread_tables[i % num_threads].append(table)
+```
+
+### Transaction Management
+```python
+# Connection with explicit transaction control
+conn = psycopg2.connect(...)
+conn.autocommit = False  # Manual transaction control
+
+# Lock table within transaction
+cursor.execute(
+    sql.SQL("LOCK TABLE {}.{} IN {} MODE").format(
+        sql.Identifier(schema),
+        sql.Identifier(table),
+        sql.SQL(lock_mode)  # e.g., "SHARE ROW EXCLUSIVE"
+    )
+)
+
+# Do work inside transaction
+# ...
+
+# Commit to release lock
+conn.commit()
+```
 
 ### Container Management
 ```python

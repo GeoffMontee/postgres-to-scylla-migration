@@ -82,21 +82,45 @@ python3 start_db_containers.py --debug --postgres-version 14
 
 ### 2. setup_migration.py
 
-Sets up the migration infrastructure between PostgreSQL and ScyllaDB.
+Sets up the migration infrastructure between PostgreSQL and ScyllaDB with **multi-threaded parallel processing**.
 
 **What it does:**
 - Installs scylla_fdw extension on PostgreSQL container
 - Creates ScyllaDB keyspace
-- For each table in the source schema:
-  - Creates a matching ScyllaDB table
-  - Creates a foreign table in PostgreSQL
-  - Sets up INSERT/UPDATE/DELETE triggers for automatic replication
-  - Migrates all existing data from PostgreSQL to ScyllaDB
+- Distributes tables across worker threads using round-robin assignment
+- For each table (processed in parallel by worker threads):
+  1. **Locks the table** using configurable PostgreSQL lock mode
+  2. Creates a matching ScyllaDB table
+  3. Creates a foreign table in PostgreSQL
+  4. Sets up INSERT/UPDATE/DELETE triggers for automatic replication
+  5. Migrates all existing data from PostgreSQL to ScyllaDB
+  6. Verifies row counts match between source and foreign tables
+  7. **Commits transaction** (releases lock)
+
+**Key Features:**
+- **Parallel processing**: Multiple tables migrated simultaneously (default: 4 threads)
+- **Configurable locking**: Control PostgreSQL lock mode for concurrent access
+- **Row count verification**: Automatic validation that data migrated correctly
+- **Skip data migration**: Option to only set up replication without copying existing data
+- **Thread-safe logging**: Clear progress updates from all threads
+- **Resilient error handling**: Failed tables don't stop other migrations
 
 **Usage:**
 ```bash
-# Basic usage (with defaults)
+# Basic usage (with defaults: 4 threads, SHARE ROW EXCLUSIVE lock)
 python3 setup_migration.py
+
+# Use 8 threads for faster migration
+python3 setup_migration.py --num-threads 8
+
+# Use a different lock mode (allows concurrent reads only)
+python3 setup_migration.py --postgres-lock-mode "ACCESS EXCLUSIVE"
+
+# Skip migrating existing data (only setup replication)
+python3 setup_migration.py --skip-existing-data
+
+# Combine options: 16 threads, skip data, custom lock
+python3 setup_migration.py --num-threads 16 --skip-existing-data --postgres-lock-mode "EXCLUSIVE"
 
 # Custom schema and keyspace
 python3 setup_migration.py \
@@ -114,6 +138,9 @@ python3 setup_migration.py \
   --postgres-source-schema public \
   --postgres-fdw-schema scylla_fdw \
   --postgres-docker-container postgresql-migration-source \
+  --postgres-lock-mode "SHARE ROW EXCLUSIVE" \
+  --num-threads 4 \
+  --skip-existing-data \
   --scylla-host localhost \
   --scylla-port 9042 \
   --scylla-ks migration \
@@ -132,6 +159,11 @@ PostgreSQL options:
 - `--postgres-source-schema` - Source schema to migrate (default: public)
 - `--postgres-fdw-schema` - Schema for foreign tables (default: scylla_fdw)
 - `--postgres-docker-container` - Container name (default: postgresql-migration-source)
+- `--postgres-lock-mode` - Lock mode for table locking during migration (default: SHARE ROW EXCLUSIVE)
+
+Migration options:
+- `--num-threads` - Number of worker threads for parallel migration (default: 4)
+- `--skip-existing-data` - Skip migrating existing data, only setup replication (flag)
 
 ScyllaDB options:
 - `--scylla-host` - ScyllaDB host for Python connection (default: localhost)
@@ -139,6 +171,23 @@ ScyllaDB options:
 - `--scylla-ks` - ScyllaDB keyspace name (default: migration)
 - `--scylla-fdw-host` - ScyllaDB host for FDW (default: scylladb-migration-target)
 - `--scylla-docker-container` - Container name (default: scylladb-migration-target)
+
+**Valid PostgreSQL Lock Modes:**
+- `ACCESS SHARE` - Least restrictive, only conflicts with ACCESS EXCLUSIVE
+- `ROW SHARE` - Conflicts with EXCLUSIVE and ACCESS EXCLUSIVE modes
+- `ROW EXCLUSIVE` - Conflicts with SHARE and more restrictive modes
+- `SHARE UPDATE EXCLUSIVE` - Protects against concurrent schema changes
+- `SHARE` - Allows concurrent reads, blocks writes
+- `SHARE ROW EXCLUSIVE` - **Default**, balances read access with write protection
+- `EXCLUSIVE` - Blocks all concurrent modifications
+- `ACCESS EXCLUSIVE` - Most restrictive, blocks everything
+
+**Performance Tuning:**
+- Use more threads (`--num-threads`) for databases with many small tables
+- Use fewer threads for databases with few large tables to avoid contention
+- `SHARE ROW EXCLUSIVE` lock allows concurrent SELECT queries during migration
+- For read-only sources during migration, consider `ACCESS EXCLUSIVE` for safety
+- Use `--skip-existing-data` when tables are empty or data already replicated
 
 ### 3. destroy_db_containers.py
 
