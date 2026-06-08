@@ -39,10 +39,14 @@ def main():
     print(f"  - Threads: {args.num_threads}")
     print(f"  - Lock mode: {args.postgres_lock_mode}")
     print(f"  - Skip existing data: {args.skip_existing_data}")
+    print(f"  - Skip FDW build: {args.skip_fdw_build}")
     
     # Step 1: Install scylla_fdw on PostgreSQL container
-    print("\n[1/5] Installing scylla_fdw on PostgreSQL container...")
-    install_scylla_fdw(args)
+    if args.skip_fdw_build:
+        print("\n[1/5] Skipping scylla_fdw download/build...")
+    else:
+        print("\n[1/5] Installing scylla_fdw on PostgreSQL container...")
+        install_scylla_fdw(args)
     
     # Step 2: Connect to databases (test connections)
     print("\n[2/5] Testing database connections...")
@@ -145,6 +149,8 @@ def parse_arguments():
                                 help='Number of worker threads for parallel migration')
     migration_group.add_argument('--skip-existing-data', action='store_true',
                                 help='Skip migrating existing data (only setup replication)')
+    migration_group.add_argument('--skip-fdw-build', action='store_true',
+                                help='Skip downloading and building scylla_fdw and its dependencies')
     
     # ScyllaDB options
     scylla_group = parser.add_argument_group('ScyllaDB options')
