@@ -30,6 +30,7 @@ def main():
     
     # Validate lock mode
     validate_lock_mode(args.postgres_lock_mode)
+    validate_scylla_auth(args)
     
     print("=" * 70)
     print("PostgreSQL to ScyllaDB Migration Setup")
@@ -187,6 +188,13 @@ def validate_lock_mode(lock_mode):
     if lock_mode.upper() not in valid_lock_modes:
         print(f"✗ Error: Invalid lock mode '{lock_mode}'")
         print(f"  Valid lock modes: {', '.join(valid_lock_modes)}")
+        sys.exit(1)
+
+
+def validate_scylla_auth(args):
+    """Validate ScyllaDB authentication options."""
+    if bool(args.scylla_user) != bool(args.scylla_password):
+        print("✗ Error: --scylla-user and --scylla-password must be provided together")
         sys.exit(1)
 
 
