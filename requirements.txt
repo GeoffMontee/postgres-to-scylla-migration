@@ -1,0 +1,3 @@
+docker
+psycopg2-binary
+scylla-driver
