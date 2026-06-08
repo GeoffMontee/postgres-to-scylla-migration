@@ -8,7 +8,6 @@ import argparse
 import sys
 import subprocess
 import time
-import docker
 import psycopg2
 from psycopg2 import sql
 from cassandra.cluster import Cluster
@@ -193,6 +192,14 @@ def validate_lock_mode(lock_mode):
 
 def install_scylla_fdw(args):
     """Install scylla_fdw on the PostgreSQL container."""
+    try:
+        import docker
+    except ImportError:
+        print("✗ Docker Python SDK is required to install scylla_fdw in a PostgreSQL container")
+        print("  Install it with: pip install docker")
+        print("  Or rerun with --skip-fdw-build if scylla_fdw is already installed.")
+        sys.exit(1)
+
     try:
         client = docker.from_env()
         container = client.containers.get(args.postgres_docker_container)
