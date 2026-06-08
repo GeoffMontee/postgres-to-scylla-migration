@@ -98,7 +98,7 @@ Sets up the migration infrastructure between PostgreSQL and ScyllaDB with **mult
   7. **Commits transaction** (releases lock)
 
 **Key Features:**
-- **Parallel processing**: Multiple tables migrated simultaneously (default: 4 threads)
+- **Parallel processing**: Multiple tables migrated simultaneously; with `--load-method direct`, a single table is split across parallel reader threads (default: 4 threads)
 - **Configurable locking**: Control PostgreSQL lock mode for concurrent access
 - **Row count verification**: Automatic validation that data migrated correctly
 - **Skip data migration**: Option to only set up replication without copying existing data
@@ -121,6 +121,9 @@ python3 setup_migration.py --skip-existing-data
 
 # Load existing data directly with the ScyllaDB Python driver
 python3 setup_migration.py --load-method direct
+
+# Use 16 threads to split a single large table during direct load
+python3 setup_migration.py --load-method direct --num-threads 16
 
 # Combine options: 16 threads, skip data, custom lock
 python3 setup_migration.py --num-threads 16 --skip-existing-data --postgres-lock-mode "EXCLUSIVE"
@@ -168,7 +171,7 @@ PostgreSQL options:
 - `--postgres-lock-mode` - Lock mode for table locking during migration (default: SHARE ROW EXCLUSIVE)
 
 Migration options:
-- `--num-threads` - Number of worker threads for parallel migration (default: 4)
+- `--num-threads` - Number of worker threads for parallel migration; also controls single-table direct-load reader threads (default: 4)
 - `--skip-existing-data` - Skip migrating existing data, only setup replication (flag)
 - `--skip-fdw-build` - Skip downloading and building scylla_fdw and its dependencies (flag)
 - `--load-method` - Existing data load method: `fdw` or `direct` (default: fdw)

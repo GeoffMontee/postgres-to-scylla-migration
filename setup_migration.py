@@ -10,6 +10,7 @@ import subprocess
 import time
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import psycopg2
 from psycopg2 import sql
 from cassandra.cluster import Cluster
@@ -80,13 +81,19 @@ def main():
     print(f"Found {len(tables)} table(s) to migrate:")
     for table in tables:
         print(f"  - {table}")
+
+    args.direct_load_table_workers = 1
+    if args.load_method == 'direct' and not args.skip_existing_data and len(tables) == 1:
+        args.direct_load_table_workers = args.num_threads
+        print(f"Direct load will use {args.direct_load_table_workers} parallel reader thread(s) for the table.")
     
     # Distribute tables across threads using round-robin
     thread_tables = [[] for _ in range(args.num_threads)]
     for i, table in enumerate(tables):
         thread_tables[i % args.num_threads].append(table)
     
-    print(f"\n[5/5] Starting {args.num_threads} worker thread(s)...")
+    active_worker_count = sum(1 for tables_list in thread_tables if tables_list)
+    print(f"\n[5/5] Starting {active_worker_count} table worker thread(s)...")
     for i, tables_list in enumerate(thread_tables):
         if tables_list:
             print(f"  Thread {i+1}: {len(tables_list)} table(s) - {', '.join(tables_list)}")
@@ -214,6 +221,10 @@ def validate_scylla_auth(args):
 
 def validate_load_options(args):
     """Validate data loading options."""
+    if args.num_threads < 1:
+        print("✗ Error: --num-threads must be at least 1")
+        sys.exit(1)
+
     if args.direct_load_fetch_size < 1:
         print("✗ Error: --direct-load-fetch-size must be at least 1")
         sys.exit(1)
@@ -505,12 +516,9 @@ def process_table_migration(pg_conn, scylla_session, table_name, args, thread_id
                 source_count = migrate_table_data_direct(
                     pg_conn,
                     scylla_session,
-                    args.scylla_ks,
-                    args.postgres_source_schema,
                     table_name,
                     columns,
-                    args.direct_load_fetch_size,
-                    args.direct_load_concurrency,
+                    args,
                     thread_id
                 )
             else:
@@ -881,27 +889,22 @@ def migrate_table_data(cursor, source_schema, fdw_schema, table_name, thread_id=
         raise
 
 
-def migrate_table_data_direct(pg_conn, scylla_session, scylla_keyspace, source_schema,
-                              table_name, columns, fetch_size, concurrency, thread_id=None):
+def migrate_table_data_direct(pg_conn, scylla_session, table_name, columns, args, thread_id=None):
     """
     Migrate existing data by streaming from PostgreSQL and writing directly to ScyllaDB.
 
     Args:
         pg_conn: PostgreSQL connection (within transaction)
         scylla_session: ScyllaDB session
-        scylla_keyspace: Target ScyllaDB keyspace
-        source_schema: Source PostgreSQL schema
         table_name: Name of the table to migrate
         columns: Column metadata from get_table_columns()
-        fetch_size: Number of PostgreSQL rows to fetch per chunk
-        concurrency: Maximum concurrent ScyllaDB writes per chunk
+        args: Parsed command-line arguments
         thread_id: Thread ID for logging (optional)
 
     Returns:
         Number of rows migrated
     """
     count_cursor = None
-    stream_cursor = None
 
     try:
         column_names = [col['name'] for col in columns]
@@ -909,7 +912,7 @@ def migrate_table_data_direct(pg_conn, scylla_session, scylla_keyspace, source_s
         count_cursor = pg_conn.cursor()
         count_cursor.execute(
             sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
-                sql.Identifier(source_schema),
+                sql.Identifier(args.postgres_source_schema),
                 sql.Identifier(table_name)
             )
         )
@@ -922,26 +925,173 @@ def migrate_table_data_direct(pg_conn, scylla_session, scylla_keyspace, source_s
                 print(f"    ⚠ No data to migrate (table is empty)")
             return 0
 
-        if thread_id:
-            thread_safe_print(f"[Thread {thread_id}]     Direct loading {row_count} row(s)...")
-        else:
-            print(f"    Direct loading {row_count} row(s)...")
-
         insert_columns = ', '.join(column_names)
         placeholders = ', '.join(['?'] * len(column_names))
         insert_stmt = scylla_session.prepare(
-            f"INSERT INTO {scylla_keyspace}.{table_name} ({insert_columns}) VALUES ({placeholders})"
+            f"INSERT INTO {args.scylla_ks}.{table_name} ({insert_columns}) VALUES ({placeholders})"
         )
 
+        worker_count = min(args.direct_load_table_workers, row_count)
+        if args.postgres_lock_mode.upper() == 'ACCESS EXCLUSIVE' and worker_count > 1:
+            thread_safe_print(
+                f"[Thread {thread_id}]     ACCESS EXCLUSIVE blocks parallel reader connections; using one direct reader"
+            )
+            worker_count = 1
+
+        if worker_count <= 1:
+            if thread_id:
+                thread_safe_print(f"[Thread {thread_id}]     Direct loading {row_count} row(s)...")
+            else:
+                print(f"    Direct loading {row_count} row(s)...")
+
+            migrated = migrate_table_data_direct_partition(
+                pg_conn,
+                scylla_session,
+                insert_stmt,
+                args.postgres_source_schema,
+                table_name,
+                columns,
+                args.direct_load_fetch_size,
+                args.direct_load_concurrency,
+                None,
+                thread_id,
+                "single",
+                row_count
+            )
+            if migrated != row_count:
+                raise RuntimeError(f"Direct load copied {migrated} of {row_count} source row(s)")
+            return row_count
+
+        page_count = get_relation_page_count(pg_conn, args.postgres_source_schema, table_name)
+        ctid_ranges = split_ctid_ranges(page_count, worker_count)
+        if len(ctid_ranges) <= 1:
+            thread_safe_print(f"[Thread {thread_id}]     Table is too small to split; using one direct reader")
+            migrated = migrate_table_data_direct_partition(
+                pg_conn,
+                scylla_session,
+                insert_stmt,
+                args.postgres_source_schema,
+                table_name,
+                columns,
+                args.direct_load_fetch_size,
+                args.direct_load_concurrency,
+                None,
+                thread_id,
+                "single",
+                row_count
+            )
+            if migrated != row_count:
+                raise RuntimeError(f"Direct load copied {migrated} of {row_count} source row(s)")
+            return row_count
+
+        thread_safe_print(
+            f"[Thread {thread_id}]     Direct loading {row_count} row(s) with {len(ctid_ranges)} parallel reader thread(s)..."
+        )
+
+        migrated = 0
+        progress_lock = threading.Lock()
+
+        def report_progress(partition_name, partition_rows):
+            nonlocal migrated
+            with progress_lock:
+                migrated += partition_rows
+                thread_safe_print(
+                    f"[Thread {thread_id}]     Direct load partition {partition_name} completed "
+                    f"({partition_rows} row(s)); total {migrated}/{row_count}"
+                )
+
+        with ThreadPoolExecutor(max_workers=len(ctid_ranges)) as executor:
+            futures = []
+            for partition_index, ctid_range in enumerate(ctid_ranges, start=1):
+                futures.append(executor.submit(
+                    migrate_table_data_direct_worker,
+                    args,
+                    scylla_session,
+                    insert_stmt,
+                    table_name,
+                    columns,
+                    ctid_range,
+                    thread_id,
+                    partition_index,
+                    len(ctid_ranges),
+                    report_progress
+                ))
+
+            for future in as_completed(futures):
+                future.result()
+
+        if migrated != row_count:
+            raise RuntimeError(f"Direct load copied {migrated} of {row_count} source row(s)")
+
+        return row_count
+
+    except Exception as e:
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     ✗ Error direct loading data: {e}")
+        else:
+            print(f"    ✗ Error direct loading data: {e}")
+        raise
+
+    finally:
+        if count_cursor:
+            count_cursor.close()
+
+
+def migrate_table_data_direct_worker(args, scylla_session, insert_stmt, table_name, columns,
+                                     ctid_range, parent_thread_id, partition_index,
+                                     partition_count, report_progress):
+    """Read one CTID range from PostgreSQL and write it directly to ScyllaDB."""
+    pg_conn = None
+    partition_name = f"{partition_index}/{partition_count}"
+
+    try:
+        pg_conn = connect_to_postgres(args, autocommit=False)
+        partition_rows = migrate_table_data_direct_partition(
+            pg_conn,
+            scylla_session,
+            insert_stmt,
+            args.postgres_source_schema,
+            table_name,
+            columns,
+            args.direct_load_fetch_size,
+            args.direct_load_concurrency,
+            ctid_range,
+            parent_thread_id,
+            partition_name,
+            None
+        )
+        report_progress(partition_name, partition_rows)
+        pg_conn.rollback()
+        return partition_rows
+
+    finally:
+        if pg_conn:
+            pg_conn.close()
+
+
+def migrate_table_data_direct_partition(pg_conn, scylla_session, insert_stmt, source_schema,
+                                        table_name, columns, fetch_size, concurrency,
+                                        ctid_range=None, thread_id=None,
+                                        partition_name="single", expected_rows=None):
+    """Stream rows from one PostgreSQL cursor and write them to ScyllaDB."""
+    stream_cursor = None
+
+    try:
+        column_names = [col['name'] for col in columns]
         stream_cursor = pg_conn.cursor(name=f"migration_stream_{thread_id}_{uuid.uuid4().hex}")
         stream_cursor.itersize = fetch_size
-        stream_cursor.execute(
-            sql.SQL("SELECT {} FROM {}.{}").format(
-                sql.SQL(', ').join(sql.Identifier(col) for col in column_names),
-                sql.Identifier(source_schema),
-                sql.Identifier(table_name)
-            )
+
+        select_sql = sql.SQL("SELECT {} FROM {}.{}").format(
+            sql.SQL(', ').join(sql.Identifier(col) for col in column_names),
+            sql.Identifier(source_schema),
+            sql.Identifier(table_name)
         )
+        params = []
+        if ctid_range:
+            select_sql += sql.SQL(" WHERE ctid >= %s::tid AND ctid < %s::tid")
+            params = [f"({ctid_range[0]},0)", f"({ctid_range[1]},0)"]
+
+        stream_cursor.execute(select_sql, params)
 
         migrated = 0
         next_progress = 100000
@@ -964,27 +1114,51 @@ def migrate_table_data_direct(pg_conn, scylla_session, scylla_keyspace, source_s
             )
 
             migrated += len(rows)
-            if migrated >= next_progress or migrated == row_count:
+            if expected_rows and (migrated >= next_progress or migrated == expected_rows):
                 if thread_id:
-                    thread_safe_print(f"[Thread {thread_id}]     Direct loaded {migrated}/{row_count} row(s)")
+                    thread_safe_print(
+                        f"[Thread {thread_id}]     Direct loaded {migrated}/{expected_rows} row(s)"
+                    )
                 else:
-                    print(f"    Direct loaded {migrated}/{row_count} row(s)")
+                    print(f"    Direct loaded {migrated}/{expected_rows} row(s)")
                 next_progress += 100000
 
-        return row_count
-
-    except Exception as e:
-        if thread_id:
-            thread_safe_print(f"[Thread {thread_id}]     ✗ Error direct loading data: {e}")
-        else:
-            print(f"    ✗ Error direct loading data: {e}")
-        raise
+        return migrated
 
     finally:
         if stream_cursor:
             stream_cursor.close()
-        if count_cursor:
-            count_cursor.close()
+
+
+def get_relation_page_count(conn, schema, table_name):
+    """Return the number of PostgreSQL heap pages for CTID range splitting."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT GREATEST(
+                1,
+                CEIL(
+                    pg_relation_size(format('%%I.%%I', %s, %s)::regclass)::numeric
+                    / current_setting('block_size')::int
+                )::bigint
+            )
+        """, [schema, table_name])
+        return cursor.fetchone()[0]
+    finally:
+        cursor.close()
+
+
+def split_ctid_ranges(page_count, worker_count):
+    """Split PostgreSQL heap pages into CTID ranges."""
+    if page_count <= 1 or worker_count <= 1:
+        return [(0, page_count)]
+
+    partition_count = min(page_count, worker_count)
+    pages_per_partition = (page_count + partition_count - 1) // partition_count
+    return [
+        (start_page, min(start_page + pages_per_partition, page_count))
+        for start_page in range(0, page_count, pages_per_partition)
+    ]
 
 
 def convert_postgres_row_for_scylla(row, columns):
