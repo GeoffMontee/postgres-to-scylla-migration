@@ -8,10 +8,13 @@ import argparse
 import sys
 import subprocess
 import time
+import json
+import uuid
 import psycopg2
 from psycopg2 import sql
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
+from cassandra.concurrent import execute_concurrent_with_args
 import threading
 from queue import Queue
 
@@ -31,6 +34,7 @@ def main():
     # Validate lock mode
     validate_lock_mode(args.postgres_lock_mode)
     validate_scylla_auth(args)
+    validate_load_options(args)
     
     print("=" * 70)
     print("PostgreSQL to ScyllaDB Migration Setup")
@@ -40,6 +44,10 @@ def main():
     print(f"  - Lock mode: {args.postgres_lock_mode}")
     print(f"  - Skip existing data: {args.skip_existing_data}")
     print(f"  - Skip FDW build: {args.skip_fdw_build}")
+    print(f"  - Load method: {args.load_method}")
+    if args.load_method == 'direct':
+        print(f"  - Direct load fetch size: {args.direct_load_fetch_size}")
+        print(f"  - Direct load concurrency: {args.direct_load_concurrency}")
     
     # Step 1: Install scylla_fdw on PostgreSQL container
     if args.skip_fdw_build:
@@ -151,6 +159,12 @@ def parse_arguments():
                                 help='Skip migrating existing data (only setup replication)')
     migration_group.add_argument('--skip-fdw-build', action='store_true',
                                 help='Skip downloading and building scylla_fdw and its dependencies')
+    migration_group.add_argument('--load-method', choices=['fdw', 'direct'], default='fdw',
+                                help='Method for loading existing data into ScyllaDB')
+    migration_group.add_argument('--direct-load-fetch-size', type=int, default=1000,
+                                help='Rows to fetch from PostgreSQL per chunk when --load-method=direct')
+    migration_group.add_argument('--direct-load-concurrency', type=int, default=100,
+                                help='Maximum concurrent ScyllaDB writes when --load-method=direct')
     
     # ScyllaDB options
     scylla_group = parser.add_argument_group('ScyllaDB options')
@@ -195,6 +209,17 @@ def validate_scylla_auth(args):
     """Validate ScyllaDB authentication options."""
     if bool(args.scylla_user) != bool(args.scylla_password):
         print("✗ Error: --scylla-user and --scylla-password must be provided together")
+        sys.exit(1)
+
+
+def validate_load_options(args):
+    """Validate data loading options."""
+    if args.direct_load_fetch_size < 1:
+        print("✗ Error: --direct-load-fetch-size must be at least 1")
+        sys.exit(1)
+
+    if args.direct_load_concurrency < 1:
+        print("✗ Error: --direct-load-concurrency must be at least 1")
         sys.exit(1)
 
 
@@ -475,9 +500,22 @@ def process_table_migration(pg_conn, scylla_session, table_name, args, thread_id
         
         # Step 5: Migrate existing data (in transaction)
         if not args.skip_existing_data:
-            thread_safe_print(f"[Thread {thread_id}]   Migrating existing data...")
-            source_count = migrate_table_data(cursor, args.postgres_source_schema, 
-                                             args.postgres_fdw_schema, table_name, thread_id)
+            thread_safe_print(f"[Thread {thread_id}]   Migrating existing data using {args.load_method} method...")
+            if args.load_method == 'direct':
+                source_count = migrate_table_data_direct(
+                    pg_conn,
+                    scylla_session,
+                    args.scylla_ks,
+                    args.postgres_source_schema,
+                    table_name,
+                    columns,
+                    args.direct_load_fetch_size,
+                    args.direct_load_concurrency,
+                    thread_id
+                )
+            else:
+                source_count = migrate_table_data(cursor, args.postgres_source_schema,
+                                                 args.postgres_fdw_schema, table_name, thread_id)
             
             # Step 6: Verify row counts
             if source_count > 0:
@@ -841,6 +879,139 @@ def migrate_table_data(cursor, source_schema, fdw_schema, table_name, thread_id=
         else:
             print(f"    ✗ Error migrating data: {e}")
         raise
+
+
+def migrate_table_data_direct(pg_conn, scylla_session, scylla_keyspace, source_schema,
+                              table_name, columns, fetch_size, concurrency, thread_id=None):
+    """
+    Migrate existing data by streaming from PostgreSQL and writing directly to ScyllaDB.
+
+    Args:
+        pg_conn: PostgreSQL connection (within transaction)
+        scylla_session: ScyllaDB session
+        scylla_keyspace: Target ScyllaDB keyspace
+        source_schema: Source PostgreSQL schema
+        table_name: Name of the table to migrate
+        columns: Column metadata from get_table_columns()
+        fetch_size: Number of PostgreSQL rows to fetch per chunk
+        concurrency: Maximum concurrent ScyllaDB writes per chunk
+        thread_id: Thread ID for logging (optional)
+
+    Returns:
+        Number of rows migrated
+    """
+    count_cursor = None
+    stream_cursor = None
+
+    try:
+        column_names = [col['name'] for col in columns]
+
+        count_cursor = pg_conn.cursor()
+        count_cursor.execute(
+            sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                sql.Identifier(source_schema),
+                sql.Identifier(table_name)
+            )
+        )
+        row_count = count_cursor.fetchone()[0]
+
+        if row_count == 0:
+            if thread_id:
+                thread_safe_print(f"[Thread {thread_id}]     No data to migrate (table is empty)")
+            else:
+                print(f"    ⚠ No data to migrate (table is empty)")
+            return 0
+
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     Direct loading {row_count} row(s)...")
+        else:
+            print(f"    Direct loading {row_count} row(s)...")
+
+        insert_columns = ', '.join(column_names)
+        placeholders = ', '.join(['?'] * len(column_names))
+        insert_stmt = scylla_session.prepare(
+            f"INSERT INTO {scylla_keyspace}.{table_name} ({insert_columns}) VALUES ({placeholders})"
+        )
+
+        stream_cursor = pg_conn.cursor(name=f"migration_stream_{thread_id}_{uuid.uuid4().hex}")
+        stream_cursor.itersize = fetch_size
+        stream_cursor.execute(
+            sql.SQL("SELECT {} FROM {}.{}").format(
+                sql.SQL(', ').join(sql.Identifier(col) for col in column_names),
+                sql.Identifier(source_schema),
+                sql.Identifier(table_name)
+            )
+        )
+
+        migrated = 0
+        next_progress = 100000
+
+        while True:
+            rows = stream_cursor.fetchmany(fetch_size)
+            if not rows:
+                break
+
+            converted_rows = [
+                convert_postgres_row_for_scylla(row, columns)
+                for row in rows
+            ]
+            execute_concurrent_with_args(
+                scylla_session,
+                insert_stmt,
+                converted_rows,
+                concurrency=concurrency,
+                raise_on_first_error=True
+            )
+
+            migrated += len(rows)
+            if migrated >= next_progress or migrated == row_count:
+                if thread_id:
+                    thread_safe_print(f"[Thread {thread_id}]     Direct loaded {migrated}/{row_count} row(s)")
+                else:
+                    print(f"    Direct loaded {migrated}/{row_count} row(s)")
+                next_progress += 100000
+
+        return row_count
+
+    except Exception as e:
+        if thread_id:
+            thread_safe_print(f"[Thread {thread_id}]     ✗ Error direct loading data: {e}")
+        else:
+            print(f"    ✗ Error direct loading data: {e}")
+        raise
+
+    finally:
+        if stream_cursor:
+            stream_cursor.close()
+        if count_cursor:
+            count_cursor.close()
+
+
+def convert_postgres_row_for_scylla(row, columns):
+    """Convert PostgreSQL driver values to values accepted by the ScyllaDB driver."""
+    converted = []
+
+    for value, col in zip(row, columns):
+        if value is None:
+            converted.append(None)
+            continue
+
+        pg_type = col['type'].lower()
+        cql_type = pg_type_to_cql_type(col['type'], col['udt_name'])
+
+        if pg_type in ('json', 'jsonb'):
+            if isinstance(value, str):
+                converted.append(value)
+            else:
+                converted.append(json.dumps(value))
+        elif pg_type == 'bytea' or isinstance(value, memoryview):
+            converted.append(bytes(value))
+        elif cql_type == 'text' and not isinstance(value, str):
+            converted.append(str(value))
+        else:
+            converted.append(value)
+
+    return tuple(converted)
 
 
 if __name__ == "__main__":

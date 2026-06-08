@@ -119,6 +119,9 @@ python3 setup_migration.py --postgres-lock-mode "ACCESS EXCLUSIVE"
 # Skip migrating existing data (only setup replication)
 python3 setup_migration.py --skip-existing-data
 
+# Load existing data directly with the ScyllaDB Python driver
+python3 setup_migration.py --load-method direct
+
 # Combine options: 16 threads, skip data, custom lock
 python3 setup_migration.py --num-threads 16 --skip-existing-data --postgres-lock-mode "EXCLUSIVE"
 
@@ -141,6 +144,9 @@ python3 setup_migration.py \
   --postgres-lock-mode "SHARE ROW EXCLUSIVE" \
   --num-threads 4 \
   --skip-existing-data \
+  --load-method fdw \
+  --direct-load-fetch-size 1000 \
+  --direct-load-concurrency 100 \
   --scylla-host localhost \
   --scylla-port 9042 \
   --scylla-ks migration \
@@ -164,6 +170,10 @@ PostgreSQL options:
 Migration options:
 - `--num-threads` - Number of worker threads for parallel migration (default: 4)
 - `--skip-existing-data` - Skip migrating existing data, only setup replication (flag)
+- `--skip-fdw-build` - Skip downloading and building scylla_fdw and its dependencies (flag)
+- `--load-method` - Existing data load method: `fdw` or `direct` (default: fdw)
+- `--direct-load-fetch-size` - PostgreSQL rows to fetch per direct-load chunk (default: 1000)
+- `--direct-load-concurrency` - Concurrent ScyllaDB writes per direct-load chunk (default: 100)
 
 ScyllaDB options:
 - `--scylla-host` - ScyllaDB host for Python connection (default: localhost)
